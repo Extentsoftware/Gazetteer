@@ -3,6 +3,7 @@ using Gazetteer.Infrastructure.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using NetTopologySuite.Geometries;
 
 namespace Gazetteer.Seeder.Services;
 
@@ -46,9 +47,59 @@ public class HierarchyBuilder
             return;
         }
 
-        // For each location without a parent, find the smallest containing admin region
+        // First: build hierarchy among admin regions themselves
+        await BuildAdminRegionHierarchyAsync(db, adminRegions, countryCode, ct);
+
+        // Then: assign all other orphan locations to their containing admin region
+        await AssignOrphansToAdminRegionsAsync(db, adminRegions, countryCode, ct);
+    }
+
+    /// <summary>
+    /// Build parent-child relationships between admin regions using spatial containment.
+    /// E.g., AdminRegion2 contained by AdminRegion1, AdminRegion1 contained by Country.
+    /// </summary>
+    private async Task BuildAdminRegionHierarchyAsync(
+        GazetteerDbContext db, List<Core.Models.Location> adminRegions,
+        string countryCode, CancellationToken ct)
+    {
+        int assigned = 0;
+
+        foreach (var region in adminRegions.Where(r => r.LocationType != LocationType.Country && r.ParentId == null))
+        {
+            // Find the smallest admin region that contains this region's centroid
+            var centroid = region.Geometry!.Centroid;
+            var point = new Point(centroid.X, centroid.Y) { SRID = 4326 };
+
+            var parent = adminRegions
+                .Where(r => r.LocationType < region.LocationType && r.Geometry != null)
+                .OrderByDescending(r => r.LocationType) // smallest containing level first
+                .FirstOrDefault(r => r.Geometry!.Contains(point));
+
+            if (parent != null)
+            {
+                region.ParentId = parent.Id;
+                assigned++;
+            }
+        }
+
+        await db.SaveChangesAsync(ct);
+        _logger.LogInformation("Admin region hierarchy for {Country}: assigned {Count} parents",
+            countryCode, assigned);
+    }
+
+    /// <summary>
+    /// For each non-admin orphan location, find the smallest containing admin region.
+    /// Uses the location's lat/lon point against admin region polygon geometries.
+    /// </summary>
+    private async Task AssignOrphansToAdminRegionsAsync(
+        GazetteerDbContext db, List<Core.Models.Location> adminRegions,
+        string countryCode, CancellationToken ct)
+    {
         var orphans = await db.Locations
             .Where(l => l.CountryCode == countryCode && l.ParentId == null && l.LocationType != LocationType.Country)
+            .Where(l => l.LocationType != LocationType.AdminRegion1 &&
+                        l.LocationType != LocationType.AdminRegion2 &&
+                        l.LocationType != LocationType.AdminRegion3)
             .ToListAsync(ct);
 
         _logger.LogInformation("Assigning parents to {Count} orphan locations in {Country}", orphans.Count, countryCode);
@@ -56,13 +107,14 @@ public class HierarchyBuilder
         int assigned = 0;
         foreach (var location in orphans)
         {
-            // Use ST_Contains if location has geometry, otherwise use point
-            var point = new NetTopologySuite.Geometries.Point(location.Longitude, location.Latitude) { SRID = 4326 };
+            if (location.Latitude == 0 && location.Longitude == 0) continue;
+
+            var point = new Point(location.Longitude, location.Latitude) { SRID = 4326 };
 
             // Find the smallest admin region containing this point
             var parent = adminRegions
                 .Where(r => r.LocationType < location.LocationType && r.Geometry != null)
-                .OrderByDescending(r => r.LocationType) // Smallest admin level first
+                .OrderByDescending(r => r.LocationType) // most specific first
                 .FirstOrDefault(r => r.Geometry!.Contains(point));
 
             if (parent != null)
