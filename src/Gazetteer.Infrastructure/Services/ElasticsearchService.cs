@@ -11,6 +11,7 @@ namespace Gazetteer.Infrastructure.Services;
 public class ElasticsearchService : IElasticsearchService
 {
     private const string IndexName = "locations";
+    private const string BoundariesIndexName = "boundaries";
     private readonly ElasticsearchClient _client;
     private readonly ILogger<ElasticsearchService> _logger;
 
@@ -156,6 +157,103 @@ public class ElasticsearchService : IElasticsearchService
     {
         await _client.Indices.DeleteAsync(IndexName, ct);
         _logger.LogInformation("Deleted Elasticsearch index '{Index}'", IndexName);
+    }
+
+    // ---- Boundaries index ----
+
+    public async Task CreateBoundariesIndexAsync(CancellationToken ct = default)
+    {
+        var existsResponse = await _client.Indices.ExistsAsync(BoundariesIndexName, ct);
+        if (existsResponse.Exists)
+        {
+            _logger.LogInformation("Index '{Index}' already exists, skipping creation", BoundariesIndexName);
+            return;
+        }
+
+        var createResponse = await _client.Indices.CreateAsync(BoundariesIndexName, c => c
+            .Settings(s => s
+                .Analysis(a => a
+                    .Analyzers(an => an
+                        .Custom("gazetteer_analyzer", ca => ca
+                            .Tokenizer("standard")
+                            .Filter(new[] { "lowercase", "asciifolding", "boundary_edge_ngram" })
+                        )
+                        .Custom("gazetteer_search_analyzer", ca => ca
+                            .Tokenizer("standard")
+                            .Filter(new[] { "lowercase", "asciifolding" })
+                        )
+                    )
+                    .TokenFilters(tf => tf
+                        .EdgeNGram("boundary_edge_ngram", eng => eng
+                            .MinGram(2)
+                            .MaxGram(15)
+                        )
+                    )
+                )
+            )
+            .Mappings(m => m
+                .Properties<BoundaryIndexDocument>(p => p
+                    .LongNumber(d => d.Id)
+                    .LongNumber(d => d.OsmId)
+                    .Text(d => d.Name, t => t
+                        .Analyzer("gazetteer_analyzer")
+                        .SearchAnalyzer("gazetteer_search_analyzer")
+                        .Fields(f => f
+                            .Keyword(k => k.Name!.Suffix("raw"))
+                        )
+                    )
+                    .Text(d => d.NameEn, t => t
+                        .Analyzer("gazetteer_analyzer")
+                        .SearchAnalyzer("gazetteer_search_analyzer")
+                    )
+                    .Keyword(d => d.LocationType)
+                    .Keyword(d => d.CountryCode)
+                    .IntegerNumber(d => d.AdminLevel)
+                    .FloatNumber(d => d.Latitude)
+                    .FloatNumber(d => d.Longitude)
+                    .LongNumber(d => d.Population)
+                    .Text(d => d.ParentChain)
+                    .GeoShape(d => d.Boundary)
+                )
+            ),
+            ct
+        );
+
+        if (!createResponse.IsValidResponse)
+        {
+            _logger.LogError("Failed to create boundaries index: {Error}", createResponse.DebugInformation);
+            throw new InvalidOperationException($"Failed to create Elasticsearch boundaries index: {createResponse.DebugInformation}");
+        }
+
+        _logger.LogInformation("Created Elasticsearch index '{Index}'", BoundariesIndexName);
+    }
+
+    public async Task BulkIndexBoundariesAsync(IEnumerable<BoundaryIndexDocument> documents, CancellationToken ct = default)
+    {
+        var batch = documents.ToList();
+        if (batch.Count == 0) return;
+
+        var response = await _client.BulkAsync(b => b
+            .Index(BoundariesIndexName)
+            .IndexMany(batch),
+            ct
+        );
+
+        if (response.Errors)
+        {
+            var errorCount = response.ItemsWithErrors.Count();
+            _logger.LogWarning("Boundaries bulk index had {ErrorCount} errors out of {Total}", errorCount, batch.Count);
+        }
+        else
+        {
+            _logger.LogDebug("Bulk indexed {Count} boundary documents", batch.Count);
+        }
+    }
+
+    public async Task DeleteBoundariesIndexAsync(CancellationToken ct = default)
+    {
+        await _client.Indices.DeleteAsync(BoundariesIndexName, ct);
+        _logger.LogInformation("Deleted Elasticsearch index '{Index}'", BoundariesIndexName);
     }
 
     private static void BuildQuery(QueryDescriptor<LocationIndexDocument> q, SearchRequest request)
