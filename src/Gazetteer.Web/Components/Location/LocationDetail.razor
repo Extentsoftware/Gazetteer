@@ -1,0 +1,99 @@
+@if (Detail != null)
+{
+    <div class="card shadow-sm">
+        <div class="card-header d-flex justify-content-between align-items-center">
+            <h5 class="mb-0">@Detail.Name</h5>
+            <span class="badge bg-primary">@Detail.LocationType</span>
+        </div>
+        <div class="card-body">
+            <div class="row">
+                <div class="col-md-6">
+                    <table class="table table-sm table-borderless mb-0">
+                        <tbody>
+                            @if (!string.IsNullOrEmpty(Detail.LocalName))
+                            {
+                                <tr>
+                                    <th class="text-muted" style="width: 130px;">Local Name</th>
+                                    <td>@Detail.LocalName</td>
+                                </tr>
+                            }
+                            @if (!string.IsNullOrEmpty(Detail.NameEn))
+                            {
+                                <tr>
+                                    <th class="text-muted">English Name</th>
+                                    <td>@Detail.NameEn</td>
+                                </tr>
+                            }
+                            <tr>
+                                <th class="text-muted">Country</th>
+                                <td>@Detail.CountryCode</td>
+                            </tr>
+                            <tr>
+                                <th class="text-muted">Coordinates</th>
+                                <td>@Detail.Latitude.ToString("F5"), @Detail.Longitude.ToString("F5")</td>
+                            </tr>
+                            @if (Detail.Population.HasValue)
+                            {
+                                <tr>
+                                    <th class="text-muted">Population</th>
+                                    <td>@Detail.Population.Value.ToString("N0")</td>
+                                </tr>
+                            }
+                            @if (!string.IsNullOrEmpty(Detail.PostalCode))
+                            {
+                                <tr>
+                                    <th class="text-muted">Postal Code</th>
+                                    <td>@Detail.PostalCode</td>
+                                </tr>
+                            }
+                            <tr>
+                                <th class="text-muted">OSM ID</th>
+                                <td>@Detail.OsmType/@Detail.OsmId</td>
+                            </tr>
+                            <tr>
+                                <th class="text-muted">Geometry</th>
+                                <td>@(Detail.HasGeometry ? "Polygon available" : "Point only")</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+                <div class="col-md-6">
+                    @if (Detail.ParentChain.Count > 0)
+                    {
+                        <h6 class="text-muted mb-2">Location Hierarchy</h6>
+                        <nav aria-label="breadcrumb">
+                            <ol class="breadcrumb">
+                                @for (int i = Detail.ParentChain.Count - 1; i >= 0; i--)
+                                {
+                                    var parent = Detail.ParentChain[i];
+                                    <li class="breadcrumb-item">
+                                        <span class="badge bg-secondary me-1">@parent.LocationType</span>
+                                        @parent.Name
+                                    </li>
+                                }
+                                <li class="breadcrumb-item active" aria-current="page">
+                                    <strong>@Detail.Name</strong>
+                                </li>
+                            </ol>
+                        </nav>
+                    }
+
+                    @if (!string.IsNullOrEmpty(Detail.AlternateNames))
+                    {
+                        <h6 class="text-muted mb-2 mt-3">Alternate Names</h6>
+                        <div>
+                            @foreach (var name in Detail.AlternateNames.Split(';', StringSplitOptions.RemoveEmptyEntries))
+                            {
+                                <span class="badge bg-light text-dark border me-1 mb-1">@name.Trim()</span>
+                            }
+                        </div>
+                    }
+                </div>
+            </div>
+        </div>
+    </div>
+}
+
+@code {
+    [Parameter] public LocationDetailDto? Detail { get; set; }
+}

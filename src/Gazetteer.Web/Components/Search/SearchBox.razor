@@ -1,0 +1,55 @@
+<div class="mb-3">
+    <div class="input-group input-group-lg">
+        <span class="input-group-text bg-white">
+            <i class="bi bi-geo-alt"></i>
+        </span>
+        <input type="text"
+               class="form-control"
+               placeholder="Search postcodes, towns, roads, districts..."
+               @bind-value="_query"
+               @bind-value:event="oninput"
+               @onkeyup="HandleKeyUp" />
+        @if (!string.IsNullOrEmpty(_query))
+        {
+            <button class="btn btn-outline-secondary" @onclick="ClearSearch">
+                <i class="bi bi-x-lg"></i>
+            </button>
+        }
+    </div>
+</div>
+
+@code {
+    [Parameter] public EventCallback<string> OnSearch { get; set; }
+
+    private string _query = string.Empty;
+    private System.Timers.Timer? _debounceTimer;
+
+    private void HandleKeyUp()
+    {
+        _debounceTimer?.Stop();
+        _debounceTimer?.Dispose();
+
+        _debounceTimer = new System.Timers.Timer(300);
+        _debounceTimer.Elapsed += async (_, _) =>
+        {
+            _debounceTimer?.Stop();
+            await InvokeAsync(async () =>
+            {
+                await OnSearch.InvokeAsync(_query);
+            });
+        };
+        _debounceTimer.AutoReset = false;
+        _debounceTimer.Start();
+    }
+
+    private async Task ClearSearch()
+    {
+        _query = string.Empty;
+        await OnSearch.InvokeAsync(string.Empty);
+    }
+
+    public void Dispose()
+    {
+        _debounceTimer?.Dispose();
+    }
+}

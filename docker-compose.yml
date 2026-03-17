@@ -1,0 +1,67 @@
+services:
+  postgres:
+    image: postgis/postgis:16-3.4
+    container_name: gazetteer-db
+    environment:
+      POSTGRES_DB: gazetteer
+      POSTGRES_USER: gazetteer
+      POSTGRES_PASSWORD: gazetteer_dev
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gazetteer"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.16.1
+    container_name: gazetteer-es
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - ES_JAVA_OPTS=-Xms512m -Xmx512m
+    ports:
+      - "9200:9200"
+    volumes:
+      - es_data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9200/_cluster/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    container_name: gazetteer-api
+    ports:
+      - "5100:8080"
+    environment:
+      - ConnectionStrings__DefaultConnection=Host=postgres;Database=gazetteer;Username=gazetteer;Password=gazetteer_dev
+      - Elasticsearch__Url=http://elasticsearch:9200
+    depends_on:
+      postgres:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+    container_name: gazetteer-web
+    ports:
+      - "5200:8080"
+    environment:
+      - ApiSettings__BaseUrl=http://api:8080
+    depends_on:
+      - api
+
+volumes:
+  postgres_data:
+  es_data:

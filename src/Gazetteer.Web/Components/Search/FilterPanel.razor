@@ -1,0 +1,57 @@
+<div class="row g-2">
+    <div class="col-6">
+        <label class="form-label small text-muted mb-1">Country</label>
+        <select class="form-select form-select-sm" @onchange="OnCountrySelect">
+            <option value="">All countries</option>
+            @foreach (var country in Countries)
+            {
+                <option value="@country.Code" selected="@(country.Code == SelectedCountry)">
+                    @country.Name
+                </option>
+            }
+        </select>
+    </div>
+    <div class="col-6">
+        <label class="form-label small text-muted mb-1">Location type</label>
+        <select class="form-select form-select-sm" @onchange="OnTypeSelect">
+            <option value="">All types</option>
+            @foreach (var type in Enum.GetValues<LocationType>())
+            {
+                <option value="@((int)type)" selected="@(type == SelectedLocationType)">
+                    @FormatTypeName(type)
+                </option>
+            }
+        </select>
+    </div>
+</div>
+
+@code {
+    [Parameter] public List<Country> Countries { get; set; } = new();
+    [Parameter] public string? SelectedCountry { get; set; }
+    [Parameter] public LocationType? SelectedLocationType { get; set; }
+    [Parameter] public EventCallback<string?> OnCountryChanged { get; set; }
+    [Parameter] public EventCallback<LocationType?> OnLocationTypeChanged { get; set; }
+
+    private async Task OnCountrySelect(ChangeEventArgs e)
+    {
+        var value = e.Value?.ToString();
+        await OnCountryChanged.InvokeAsync(string.IsNullOrEmpty(value) ? null : value);
+    }
+
+    private async Task OnTypeSelect(ChangeEventArgs e)
+    {
+        var value = e.Value?.ToString();
+        if (string.IsNullOrEmpty(value))
+            await OnLocationTypeChanged.InvokeAsync(null);
+        else if (int.TryParse(value, out var typeInt))
+            await OnLocationTypeChanged.InvokeAsync((LocationType)typeInt);
+    }
+
+    private static string FormatTypeName(LocationType type) => type switch
+    {
+        LocationType.AdminRegion1 => "Admin Region 1",
+        LocationType.AdminRegion2 => "Admin Region 2",
+        LocationType.AdminRegion3 => "Admin Region 3",
+        _ => type.ToString()
+    };
+}

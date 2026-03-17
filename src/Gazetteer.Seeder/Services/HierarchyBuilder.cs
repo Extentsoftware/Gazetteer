@@ -1,0 +1,158 @@
+using Gazetteer.Core.Enums;
+using Gazetteer.Infrastructure.Data;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
+
+namespace Gazetteer.Seeder.Services;
+
+public class HierarchyBuilder
+{
+    private readonly IServiceProvider _serviceProvider;
+    private readonly ILogger<HierarchyBuilder> _logger;
+
+    public HierarchyBuilder(IServiceProvider serviceProvider, ILogger<HierarchyBuilder> logger)
+    {
+        _serviceProvider = serviceProvider;
+        _logger = logger;
+    }
+
+    public async Task BuildHierarchyAsync(string countryCode, CancellationToken ct = default)
+    {
+        _logger.LogInformation("Building hierarchy for country: {Country}", countryCode);
+
+        using var scope = _serviceProvider.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<GazetteerDbContext>();
+
+        // Get admin regions sorted by level (largest first)
+        var adminRegions = await db.Locations
+            .Where(l => l.CountryCode == countryCode &&
+                        (l.LocationType == LocationType.Country ||
+                         l.LocationType == LocationType.AdminRegion1 ||
+                         l.LocationType == LocationType.AdminRegion2 ||
+                         l.LocationType == LocationType.AdminRegion3))
+            .Where(l => l.Geometry != null)
+            .OrderBy(l => l.LocationType)
+            .ToListAsync(ct);
+
+        _logger.LogInformation("Found {Count} admin regions with geometry for {Country}",
+            adminRegions.Count, countryCode);
+
+        if (adminRegions.Count == 0)
+        {
+            _logger.LogWarning("No admin regions with geometry found for {Country}. " +
+                "Falling back to proximity-based hierarchy.", countryCode);
+            await BuildProximityHierarchyAsync(db, countryCode, ct);
+            return;
+        }
+
+        // For each location without a parent, find the smallest containing admin region
+        var orphans = await db.Locations
+            .Where(l => l.CountryCode == countryCode && l.ParentId == null && l.LocationType != LocationType.Country)
+            .ToListAsync(ct);
+
+        _logger.LogInformation("Assigning parents to {Count} orphan locations in {Country}", orphans.Count, countryCode);
+
+        int assigned = 0;
+        foreach (var location in orphans)
+        {
+            // Use ST_Contains if location has geometry, otherwise use point
+            var point = new NetTopologySuite.Geometries.Point(location.Longitude, location.Latitude) { SRID = 4326 };
+
+            // Find the smallest admin region containing this point
+            var parent = adminRegions
+                .Where(r => r.LocationType < location.LocationType && r.Geometry != null)
+                .OrderByDescending(r => r.LocationType) // Smallest admin level first
+                .FirstOrDefault(r => r.Geometry!.Contains(point));
+
+            if (parent != null)
+            {
+                location.ParentId = parent.Id;
+                assigned++;
+            }
+
+            if (assigned % 1000 == 0 && assigned > 0)
+                _logger.LogInformation("Assigned {Count} parents so far", assigned);
+        }
+
+        await db.SaveChangesAsync(ct);
+        _logger.LogInformation("Hierarchy complete for {Country}: {Assigned} of {Total} locations assigned parents",
+            countryCode, assigned, orphans.Count);
+    }
+
+    private async Task BuildProximityHierarchyAsync(GazetteerDbContext db, string countryCode, CancellationToken ct)
+    {
+        // Fallback: assign parent based on nearest higher-level location
+        var country = await db.Locations
+            .FirstOrDefaultAsync(l => l.CountryCode == countryCode && l.LocationType == LocationType.Country, ct);
+
+        if (country == null)
+        {
+            _logger.LogWarning("No country-level location found for {Country}", countryCode);
+            return;
+        }
+
+        // Assign all AdminRegion1 to country
+        var region1s = await db.Locations
+            .Where(l => l.CountryCode == countryCode && l.LocationType == LocationType.AdminRegion1 && l.ParentId == null)
+            .ToListAsync(ct);
+        foreach (var r in region1s) r.ParentId = country.Id;
+
+        // Assign AdminRegion2 to nearest AdminRegion1
+        await AssignToNearestParentAsync(db, countryCode, LocationType.AdminRegion2, LocationType.AdminRegion1, ct);
+
+        // Assign cities/towns/villages to nearest admin region
+        var childTypes = new[] { LocationType.City, LocationType.Town, LocationType.Village,
+                                  LocationType.Neighborhood, LocationType.Locality,
+                                  LocationType.Road, LocationType.Postcode };
+
+        foreach (var childType in childTypes)
+        {
+            await AssignToNearestParentAsync(db, countryCode, childType, null, ct);
+        }
+
+        await db.SaveChangesAsync(ct);
+    }
+
+    private async Task AssignToNearestParentAsync(
+        GazetteerDbContext db, string countryCode,
+        LocationType childType, LocationType? parentType,
+        CancellationToken ct)
+    {
+        var children = await db.Locations
+            .Where(l => l.CountryCode == countryCode && l.LocationType == childType && l.ParentId == null)
+            .ToListAsync(ct);
+
+        if (children.Count == 0) return;
+
+        // Get potential parents (any higher-level location)
+        var parents = await db.Locations
+            .Where(l => l.CountryCode == countryCode &&
+                        (parentType.HasValue ? l.LocationType == parentType.Value : l.LocationType < childType) &&
+                        l.LocationType != LocationType.Road && l.LocationType != LocationType.Postcode)
+            .AsNoTracking()
+            .ToListAsync(ct);
+
+        if (parents.Count == 0) return;
+
+        foreach (var child in children)
+        {
+            var nearest = parents
+                .OrderBy(p => Distance(child.Latitude, child.Longitude, p.Latitude, p.Longitude))
+                .FirstOrDefault();
+
+            if (nearest != null)
+                child.ParentId = nearest.Id;
+        }
+
+        _logger.LogInformation("Assigned {Count} {Type} locations to nearest parent in {Country}",
+            children.Count, childType, countryCode);
+    }
+
+    private static double Distance(double lat1, double lon1, double lat2, double lon2)
+    {
+        var dlat = lat2 - lat1;
+        var dlon = lon2 - lon1;
+        return dlat * dlat + dlon * dlon; // Squared Euclidean distance (sufficient for ranking)
+    }
+}

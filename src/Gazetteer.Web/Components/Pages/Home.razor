@@ -1,0 +1,163 @@
+@page "/"
+@rendermode InteractiveServer
+@inject GazetteerApiClient Api
+
+<div class="container-fluid px-4 py-3">
+    <div class="row">
+        <!-- Left panel: Search + Filters -->
+        <div class="col-lg-5 col-xl-4">
+            <div class="card shadow-sm mb-3">
+                <div class="card-body">
+                    <h5 class="card-title mb-3">
+                        <i class="bi bi-search me-2"></i>Search Locations
+                    </h5>
+                    <SearchBox OnSearch="HandleSearch" />
+                    <FilterPanel Countries="_countries"
+                                 SelectedCountry="_selectedCountry"
+                                 SelectedLocationType="_selectedLocationType"
+                                 OnCountryChanged="HandleCountryChanged"
+                                 OnLocationTypeChanged="HandleLocationTypeChanged" />
+                </div>
+            </div>
+
+            <SearchResults Results="_results"
+                           IsLoading="_isLoading"
+                           SelectedId="_selectedLocation?.Id"
+                           OnSelected="HandleLocationSelected" />
+        </div>
+
+        <!-- Right panel: Detail + Map -->
+        <div class="col-lg-7 col-xl-8">
+            @if (_selectedDetail != null)
+            {
+                <LocationDetail Detail="_selectedDetail" />
+            }
+
+            <div class="card shadow-sm mt-3">
+                <div class="card-body p-0" style="height: 500px;">
+                    <LeafletMap @ref="_map"
+                                Latitude="_mapLat"
+                                Longitude="_mapLon"
+                                Zoom="_mapZoom" />
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+@code {
+    private List<Country> _countries = new();
+    private List<SearchResultDto> _results = new();
+    private SearchResultDto? _selectedLocation;
+    private LocationDetailDto? _selectedDetail;
+    private string? _selectedCountry;
+    private LocationType? _selectedLocationType;
+    private bool _isLoading;
+    private string _lastQuery = string.Empty;
+
+    private LeafletMap? _map;
+    private double _mapLat = 50.0;
+    private double _mapLon = 10.0;
+    private int _mapZoom = 4;
+
+    protected override async Task OnInitializedAsync()
+    {
+        try
+        {
+            _countries = await Api.GetCountriesAsync();
+        }
+        catch
+        {
+            // API might not be available yet
+        }
+    }
+
+    private async Task HandleSearch(string query)
+    {
+        _lastQuery = query;
+        if (string.IsNullOrWhiteSpace(query) || query.Length < 2)
+        {
+            _results = new();
+            return;
+        }
+
+        _isLoading = true;
+        StateHasChanged();
+
+        try
+        {
+            _results = await Api.SearchAsync(query, _selectedCountry, _selectedLocationType);
+        }
+        catch
+        {
+            _results = new();
+        }
+        finally
+        {
+            _isLoading = false;
+            StateHasChanged();
+        }
+    }
+
+    private async Task HandleLocationSelected(SearchResultDto location)
+    {
+        _selectedLocation = location;
+        _mapLat = location.Latitude;
+        _mapLon = location.Longitude;
+        _mapZoom = GetZoomForType(location.LocationType);
+
+        try
+        {
+            _selectedDetail = await Api.GetLocationAsync(location.Id);
+
+            if (_map != null)
+            {
+                if (location.HasGeometry)
+                {
+                    var geojson = await Api.GetGeometryAsync(location.Id);
+                    if (geojson != null)
+                        await _map.ShowGeoJsonAsync(geojson);
+                }
+                else
+                {
+                    await _map.SetMarkerAsync(location.Latitude, location.Longitude, location.Name);
+                }
+            }
+        }
+        catch
+        {
+            // Handle gracefully
+        }
+
+        StateHasChanged();
+    }
+
+    private async Task HandleCountryChanged(string? country)
+    {
+        _selectedCountry = country;
+        if (!string.IsNullOrEmpty(_lastQuery))
+            await HandleSearch(_lastQuery);
+    }
+
+    private async Task HandleLocationTypeChanged(LocationType? type)
+    {
+        _selectedLocationType = type;
+        if (!string.IsNullOrEmpty(_lastQuery))
+            await HandleSearch(_lastQuery);
+    }
+
+    private static int GetZoomForType(LocationType type) => type switch
+    {
+        LocationType.Country => 6,
+        LocationType.AdminRegion1 => 8,
+        LocationType.AdminRegion2 => 10,
+        LocationType.AdminRegion3 => 11,
+        LocationType.City => 12,
+        LocationType.Town => 13,
+        LocationType.Village => 14,
+        LocationType.Neighborhood => 15,
+        LocationType.Postcode => 14,
+        LocationType.Road => 16,
+        _ => 12
+    };
+}

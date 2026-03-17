@@ -1,0 +1,38 @@
+@inject IJSRuntime JS
+
+<div id="gazetteer-map" style="height: 100%; width: 100%;"></div>
+
+@code {
+    [Parameter] public double Latitude { get; set; } = 50.0;
+    [Parameter] public double Longitude { get; set; } = 10.0;
+    [Parameter] public int Zoom { get; set; } = 4;
+
+    private bool _initialized;
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            await JS.InvokeVoidAsync("leafletInterop.initialize", "gazetteer-map", Latitude, Longitude, Zoom);
+            _initialized = true;
+        }
+    }
+
+    public async Task SetMarkerAsync(double lat, double lon, string label)
+    {
+        if (_initialized)
+            await JS.InvokeVoidAsync("leafletInterop.setMarker", lat, lon, label);
+    }
+
+    public async Task ShowGeoJsonAsync(object geoJson)
+    {
+        if (_initialized)
+            await JS.InvokeVoidAsync("leafletInterop.showGeoJson", geoJson);
+    }
+
+    public async Task FlyToAsync(double lat, double lon, int zoom)
+    {
+        if (_initialized)
+            await JS.InvokeVoidAsync("leafletInterop.flyTo", lat, lon, zoom);
+    }
+}

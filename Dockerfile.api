@@ -1,0 +1,19 @@
+FROM mcr.microsoft.com/dotnet/aspnet:9.0 AS base
+WORKDIR /app
+EXPOSE 8080
+
+FROM mcr.microsoft.com/dotnet/sdk:9.0 AS build
+WORKDIR /src
+COPY Directory.Build.props .
+COPY src/Gazetteer.Core/Gazetteer.Core.csproj src/Gazetteer.Core/
+COPY src/Gazetteer.Infrastructure/Gazetteer.Infrastructure.csproj src/Gazetteer.Infrastructure/
+COPY src/Gazetteer.Api/Gazetteer.Api.csproj src/Gazetteer.Api/
+RUN dotnet restore src/Gazetteer.Api/Gazetteer.Api.csproj
+
+COPY src/ src/
+RUN dotnet publish src/Gazetteer.Api/Gazetteer.Api.csproj -c Release -o /app/publish
+
+FROM base AS final
+WORKDIR /app
+COPY --from=build /app/publish .
+ENTRYPOINT ["dotnet", "Gazetteer.Api.dll"]

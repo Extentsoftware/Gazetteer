@@ -1,0 +1,68 @@
+@if (IsLoading)
+{
+    <div class="text-center py-4">
+        <div class="spinner-border text-primary" role="status">
+            <span class="visually-hidden">Searching...</span>
+        </div>
+    </div>
+}
+else if (Results.Count > 0)
+{
+    <div class="list-group shadow-sm">
+        @foreach (var result in Results)
+        {
+            var isSelected = result.Id == SelectedId;
+            <button class="list-group-item list-group-item-action @(isSelected ? "active" : "")"
+                    @onclick="() => OnSelected.InvokeAsync(result)">
+                <div class="d-flex justify-content-between align-items-start">
+                    <div>
+                        <h6 class="mb-1">@result.Name</h6>
+                        <small class="@(isSelected ? "text-white-50" : "text-muted")">
+                            @if (result.ParentChain.Count > 0)
+                            {
+                                @string.Join(" > ", result.ParentChain.Select(p => p.Name))
+                            }
+                        </small>
+                    </div>
+                    <div class="text-end">
+                        <span class="badge @GetTypeBadgeClass(result.LocationType)">
+                            @result.LocationType
+                        </span>
+                        @if (!string.IsNullOrEmpty(result.PostalCode))
+                        {
+                            <br />
+                            <small class="@(isSelected ? "text-white-50" : "text-muted")">@result.PostalCode</small>
+                        }
+                    </div>
+                </div>
+            </button>
+        }
+    </div>
+}
+else if (Results.Count == 0 && SelectedId == null)
+{
+    <div class="text-center text-muted py-4">
+        <i class="bi bi-geo-alt fs-1"></i>
+        <p class="mt-2">Search for postcodes, towns, roads, districts...</p>
+    </div>
+}
+
+@code {
+    [Parameter] public List<SearchResultDto> Results { get; set; } = new();
+    [Parameter] public bool IsLoading { get; set; }
+    [Parameter] public long? SelectedId { get; set; }
+    [Parameter] public EventCallback<SearchResultDto> OnSelected { get; set; }
+
+    private static string GetTypeBadgeClass(LocationType type) => type switch
+    {
+        LocationType.Country => "bg-danger",
+        LocationType.AdminRegion1 or LocationType.AdminRegion2 or LocationType.AdminRegion3 => "bg-warning text-dark",
+        LocationType.City => "bg-primary",
+        LocationType.Town => "bg-info text-dark",
+        LocationType.Village => "bg-success",
+        LocationType.Neighborhood => "bg-secondary",
+        LocationType.Postcode => "bg-dark",
+        LocationType.Road => "bg-light text-dark border",
+        _ => "bg-secondary"
+    };
+}

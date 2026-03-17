@@ -1,0 +1,19 @@
+@inherits LayoutComponentBase
+
+<div class="d-flex flex-column min-vh-100">
+    <nav class="navbar navbar-dark bg-dark">
+        <div class="container-fluid">
+            <a class="navbar-brand" href="/">
+                <i class="bi bi-geo-alt-fill me-2"></i>EU & UK Gazetteer
+            </a>
+        </div>
+    </nav>
+
+    <main class="flex-grow-1">
+        @Body
+    </main>
+
+    <footer class="bg-light text-muted text-center py-2 border-top">
+        <small>EU & UK Gazetteer &mdash; Powered by OpenStreetMap data</small>
+    </footer>
+</div>
