@@ -30,7 +30,7 @@ public class SearchController : ControllerBase
         if (limit is < 1 or > 100)
             limit = 20;
 
-        var request = new SearchRequest
+        var request = new GazetteerSearchRequest
         {
             Query = q,
             CountryCode = country,

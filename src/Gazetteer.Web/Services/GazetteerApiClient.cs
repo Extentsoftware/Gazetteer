@@ -1,4 +1,6 @@
 using System.Net.Http.Json;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using Gazetteer.Core.DTOs;
 using Gazetteer.Core.Enums;
 using Gazetteer.Core.Models;
@@ -8,6 +10,12 @@ namespace Gazetteer.Web.Services;
 public class GazetteerApiClient
 {
     private readonly HttpClient _http;
+
+    private static readonly JsonSerializerOptions JsonOptions = new()
+    {
+        PropertyNameCaseInsensitive = true,
+        Converters = { new JsonStringEnumConverter() }
+    };
 
     public GazetteerApiClient(HttpClient http)
     {
@@ -23,29 +31,29 @@ public class GazetteerApiClient
         if (locationType.HasValue)
             url += $"&type={locationType.Value}";
 
-        var result = await _http.GetFromJsonAsync<List<SearchResultDto>>(url);
-        return result ?? new List<SearchResultDto>();
+        var result = await _http.GetFromJsonAsync<List<SearchResultDto>>(url, JsonOptions);
+        return result ?? [];
     }
 
     public async Task<LocationDetailDto?> GetLocationAsync(long id)
     {
-        return await _http.GetFromJsonAsync<LocationDetailDto>($"/api/locations/{id}");
+        return await _http.GetFromJsonAsync<LocationDetailDto>($"/api/locations/{id}", JsonOptions);
     }
 
     public async Task<GeoJsonResult?> GetGeometryAsync(long id)
     {
-        return await _http.GetFromJsonAsync<GeoJsonResult>($"/api/locations/{id}/geometry");
+        return await _http.GetFromJsonAsync<GeoJsonResult>($"/api/locations/{id}/geometry", JsonOptions);
     }
 
     public async Task<List<Country>> GetCountriesAsync()
     {
-        var result = await _http.GetFromJsonAsync<List<Country>>("/api/countries");
-        return result ?? new List<Country>();
+        var result = await _http.GetFromJsonAsync<List<Country>>("/api/countries", JsonOptions);
+        return result ?? [];
     }
 
     public async Task<List<string>> GetLocationTypesAsync()
     {
-        var result = await _http.GetFromJsonAsync<List<string>>("/api/countries/location-types");
-        return result ?? new List<string>();
+        var result = await _http.GetFromJsonAsync<List<string>>("/api/countries/location-types", JsonOptions);
+        return result ?? [];
     }
 }

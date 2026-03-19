@@ -25,10 +25,10 @@ public class SearchService : ISearchService
         _logger = logger;
     }
 
-    public async Task<List<SearchResultDto>> SearchAsync(SearchRequest request, CancellationToken ct = default)
+    public async Task<List<SearchResultDto>> SearchAsync(GazetteerSearchRequest request, CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(request.Query) || request.Query.Length < 2)
-            return new List<SearchResultDto>();
+            return [];
 
         var cacheKey = $"search:{request.Query}:{request.CountryCode}:{request.LocationType}:{request.Limit}";
         if (_cache.TryGetValue(cacheKey, out List<SearchResultDto>? cached) && cached != null)
@@ -36,35 +36,26 @@ public class SearchService : ISearchService
 
         var hits = await _elasticsearch.SearchAsync(request, ct);
         if (hits.Count == 0)
-            return new List<SearchResultDto>();
+            return [];
 
-        var results = new List<SearchResultDto>();
-        foreach (var hit in hits)
+        var results = hits.Select(hit => new SearchResultDto
         {
-            var location = await _repository.GetByIdAsync(hit.Id, ct);
-            if (location == null) continue;
-
-            var parentChain = await _repository.GetParentChainAsync(hit.Id, ct);
-
-            results.Add(new SearchResultDto
+            Id = hit.Id,
+            Name = hit.Name,
+            LocationType = Enum.TryParse<Core.Enums.LocationType>(hit.LocationType, out var lt) ? lt : Core.Enums.LocationType.Locality,
+            CountryCode = hit.CountryCode,
+            Latitude = hit.Latitude,
+            Longitude = hit.Longitude,
+            HasGeometry = hit.HasGeometry,
+            PostalCode = hit.PostalCode,
+            Score = hit.Score,
+            ParentChain = [.. hit.Parents.Select(p => new ParentDto
             {
-                Id = location.Id,
-                Name = location.Name,
-                LocationType = location.LocationType,
-                CountryCode = location.CountryCode,
-                Latitude = location.Latitude,
-                Longitude = location.Longitude,
-                HasGeometry = location.Geometry != null,
-                PostalCode = location.PostalCode,
-                Score = hit.Score,
-                ParentChain = parentChain.Select(p => new ParentDto
-                {
-                    Id = p.Id,
-                    Name = p.Name,
-                    LocationType = p.LocationType
-                }).ToList()
-            });
-        }
+                Id = p.OsmId,
+                Name = p.Name,
+                LocationType = Enum.TryParse<Core.Enums.LocationType>(p.LocationType, out var plt) ? plt : Core.Enums.LocationType.Locality
+            })]
+        }).ToList();
 
         _cache.Set(cacheKey, results, TimeSpan.FromSeconds(30));
         return results;
@@ -93,12 +84,12 @@ public class SearchService : ISearchService
             HasGeometry = location.Geometry != null,
             Population = location.Population,
             PostalCode = location.PostalCode,
-            ParentChain = parentChain.Select(p => new ParentDto
+            ParentChain = [.. parentChain.Select(p => new ParentDto
             {
                 Id = p.Id,
                 Name = p.Name,
                 LocationType = p.LocationType
-            }).ToList()
+            })]
         };
     }
 

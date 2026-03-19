@@ -4,6 +4,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using NetTopologySuite.Geometries;
+using NetTopologySuite.Geometries.Prepared;
 
 namespace Gazetteer.Seeder.Services;
 
@@ -62,18 +63,19 @@ public class HierarchyBuilder
         GazetteerDbContext db, List<Core.Models.Location> adminRegions,
         string countryCode, CancellationToken ct)
     {
+        // Pre-validate and prepare geometries for fast containment checks
+        var preparedRegions = PrepareGeometries(adminRegions);
         int assigned = 0;
 
         foreach (var region in adminRegions.Where(r => r.LocationType != LocationType.Country && r.ParentId == null))
         {
-            // Find the smallest admin region that contains this region's centroid
             var centroid = region.Geometry!.Centroid;
             var point = new Point(centroid.X, centroid.Y) { SRID = 4326 };
 
             var parent = adminRegions
                 .Where(r => r.LocationType < region.LocationType && r.Geometry != null)
-                .OrderByDescending(r => r.LocationType) // smallest containing level first
-                .FirstOrDefault(r => r.Geometry!.Contains(point));
+                .OrderByDescending(r => r.LocationType)
+                .FirstOrDefault(r => SafeContains(preparedRegions, r.Id, point));
 
             if (parent != null)
             {
@@ -104,6 +106,7 @@ public class HierarchyBuilder
 
         _logger.LogInformation("Assigning parents to {Count} orphan locations in {Country}", orphans.Count, countryCode);
 
+        var preparedRegions = PrepareGeometries(adminRegions);
         int assigned = 0;
         foreach (var location in orphans)
         {
@@ -114,8 +117,8 @@ public class HierarchyBuilder
             // Find the smallest admin region containing this point
             var parent = adminRegions
                 .Where(r => r.LocationType < location.LocationType && r.Geometry != null)
-                .OrderByDescending(r => r.LocationType) // most specific first
-                .FirstOrDefault(r => r.Geometry!.Contains(point));
+                .OrderByDescending(r => r.LocationType)
+                .FirstOrDefault(r => SafeContains(preparedRegions, r.Id, point));
 
             if (parent != null)
             {
@@ -199,6 +202,49 @@ public class HierarchyBuilder
 
         _logger.LogInformation("Assigned {Count} {Type} locations to nearest parent in {Country}",
             children.Count, childType, countryCode);
+    }
+
+    /// <summary>
+    /// Pre-validates geometries with MakeValid() and builds PreparedGeometry for fast containment checks.
+    /// </summary>
+    private Dictionary<long, IPreparedGeometry> PrepareGeometries(List<Core.Models.Location> regions)
+    {
+        var factory = new PreparedGeometryFactory();
+        var result = new Dictionary<long, IPreparedGeometry>();
+
+        foreach (var region in regions.Where(r => r.Geometry != null))
+        {
+            try
+            {
+                var geom = region.Geometry!;
+                if (!geom.IsValid)
+                    geom = geom.Buffer(0); // fast way to fix most invalid geometries
+
+                result[region.Id] = factory.Create(geom);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning("Skipping invalid geometry for {Name} (ID {Id}): {Error}",
+                    region.Name, region.Id, ex.Message);
+            }
+        }
+
+        return result;
+    }
+
+    private static bool SafeContains(Dictionary<long, IPreparedGeometry> prepared, long regionId, Point point)
+    {
+        if (!prepared.TryGetValue(regionId, out var geom))
+            return false;
+
+        try
+        {
+            return geom.Contains(point);
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private static double Distance(double lat1, double lon1, double lat2, double lon2)

@@ -12,6 +12,6 @@ public class SearchResultDto
     public double Longitude { get; set; }
     public bool HasGeometry { get; set; }
     public string? PostalCode { get; set; }
-    public List<ParentDto> ParentChain { get; set; } = new();
+    public List<ParentDto> ParentChain { get; set; } = [];
     public double Score { get; set; }
 }

@@ -18,5 +18,5 @@ public class LocationDetailDto
     public bool HasGeometry { get; set; }
     public long? Population { get; set; }
     public string? PostalCode { get; set; }
-    public List<ParentDto> ParentChain { get; set; } = new();
+    public List<ParentDto> ParentChain { get; set; } = [];
 }

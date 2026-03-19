@@ -9,14 +9,14 @@ public class SearchRequestTests
     [Fact]
     public void SearchRequest_DefaultLimit_Is20()
     {
-        var request = new SearchRequest();
+        var request = new GazetteerSearchRequest();
         Assert.Equal(20, request.Limit);
     }
 
     [Fact]
     public void SearchRequest_CanSetAllProperties()
     {
-        var request = new SearchRequest
+        var request = new GazetteerSearchRequest
         {
             Query = "London",
             CountryCode = "GB",

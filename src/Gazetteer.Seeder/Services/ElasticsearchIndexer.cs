@@ -11,16 +11,18 @@ namespace Gazetteer.Seeder.Services;
 
 public class ElasticsearchIndexer
 {
+    private record ParentLookupEntry(long OsmId, string Name, string? NameEn, string? LocalName, string LocationType, long? ParentId);
+
     private readonly IServiceProvider _serviceProvider;
     private readonly ILogger<ElasticsearchIndexer> _logger;
 
-    private static readonly HashSet<LocationType> AdminTypes = new()
-    {
+    private static readonly HashSet<LocationType> AdminTypes =
+    [
         LocationType.Country,
         LocationType.AdminRegion1,
         LocationType.AdminRegion2,
         LocationType.AdminRegion3
-    };
+    ];
 
     private static readonly Dictionary<LocationType, int> AdminLevelMap = new()
     {
@@ -52,14 +54,56 @@ public class ElasticsearchIndexer
         await esService.CreateIndexAsync(ct);
         await esService.CreateBoundariesIndexAsync(ct);
 
-        await IndexLocationsAsync(esService, db, batchSize, ct);
-        await IndexBoundariesAsync(esService, db, batchSize, ct);
+        // Pre-load a lookup of all locations for building parent chains
+        _logger.LogInformation("Loading parent lookup...");
+        var parentLookup = await db.Locations
+            .AsNoTracking()
+            .Select(l => new { l.Id, Entry = new ParentLookupEntry(l.OsmId, l.Name, l.NameEn, l.LocalName, l.LocationType.ToString(), l.ParentId) })
+            .ToDictionaryAsync(l => l.Id, l => l.Entry, ct);
+
+        _logger.LogInformation("Parent lookup loaded: {Count:N0} entries", parentLookup.Count);
+
+        await IndexLocationsAsync(esService, db, parentLookup, batchSize, ct);
+        await IndexBoundariesAsync(esService, db, parentLookup, batchSize, ct);
 
         _logger.LogInformation("Elasticsearch indexing complete");
     }
 
+    private List<ParentInfo> BuildParentsList(long? parentId, Dictionary<long, ParentLookupEntry> lookup)
+    {
+        var parents = new List<ParentInfo>();
+        var visited = new HashSet<long>();
+        var currentId = parentId;
+
+        while (currentId.HasValue && visited.Add(currentId.Value))
+        {
+            if (!lookup.TryGetValue(currentId.Value, out var parent))
+                break;
+
+            parents.Add(new ParentInfo
+            {
+                OsmId = parent.OsmId,
+                Name = parent.Name,
+                NameEn = parent.NameEn,
+                LocalName = parent.LocalName,
+                LocationType = parent.LocationType
+            });
+
+            currentId = parent.ParentId;
+        }
+
+        return parents;
+    }
+
+    private static string? BuildParentChain(List<ParentInfo> parents)
+    {
+        if (parents.Count == 0) return null;
+        return string.Join(" > ", parents.Select(p => p.Name));
+    }
+
     private async Task IndexLocationsAsync(
         IElasticsearchService esService, GazetteerDbContext db,
+        Dictionary<long, ParentLookupEntry> parentLookup,
         int batchSize, CancellationToken ct)
     {
         var totalCount = await db.Locations.CountAsync(ct);
@@ -78,6 +122,7 @@ public class ElasticsearchIndexer
                 .Select(l => new
                 {
                     l.Id,
+                    l.OsmId,
                     l.Name,
                     l.NameEn,
                     l.AlternateNames,
@@ -88,25 +133,30 @@ public class ElasticsearchIndexer
                     l.Longitude,
                     l.Population,
                     HasGeometry = l.Geometry != null,
-                    ParentName = l.Parent != null ? l.Parent.Name : null,
-                    GrandParentName = l.Parent != null && l.Parent.Parent != null ? l.Parent.Parent.Name : null
+                    l.ParentId
                 })
                 .ToListAsync(ct);
 
-            var documents = locations.Select(l => new LocationIndexDocument
+            var documents = locations.Select(l =>
             {
-                Id = l.Id,
-                Name = l.Name,
-                NameEn = l.NameEn,
-                AlternateNames = l.AlternateNames,
-                LocationType = l.LocationType,
-                CountryCode = l.CountryCode,
-                PostalCode = l.PostalCode,
-                Latitude = l.Latitude,
-                Longitude = l.Longitude,
-                Population = l.Population,
-                HasGeometry = l.HasGeometry,
-                ParentChain = BuildParentChain(l.ParentName, l.GrandParentName)
+                var parents = BuildParentsList(l.ParentId, parentLookup);
+                return new LocationIndexDocument
+                {
+                    Id = l.Id,
+                    OsmId = l.OsmId,
+                    Name = l.Name,
+                    NameEn = l.NameEn,
+                    AlternateNames = l.AlternateNames,
+                    LocationType = l.LocationType,
+                    CountryCode = l.CountryCode,
+                    PostalCode = l.PostalCode,
+                    Latitude = l.Latitude,
+                    Longitude = l.Longitude,
+                    Population = l.Population,
+                    HasGeometry = l.HasGeometry,
+                    ParentChain = BuildParentChain(parents),
+                    Parents = parents
+                };
             }).ToList();
 
             await esService.BulkIndexAsync(documents, ct);
@@ -121,6 +171,7 @@ public class ElasticsearchIndexer
 
     private async Task IndexBoundariesAsync(
         IElasticsearchService esService, GazetteerDbContext db,
+        Dictionary<long, ParentLookupEntry> parentLookup,
         int batchSize, CancellationToken ct)
     {
         var totalCount = await db.Locations
@@ -159,8 +210,7 @@ public class ElasticsearchIndexer
                     l.Longitude,
                     l.Population,
                     l.Geometry,
-                    ParentName = l.Parent != null ? l.Parent.Name : null,
-                    GrandParentName = l.Parent != null && l.Parent.Parent != null ? l.Parent.Parent.Name : null
+                    l.ParentId
                 })
                 .ToListAsync(ct);
 
@@ -183,6 +233,7 @@ public class ElasticsearchIndexer
 
                 if (geoShape == null) continue;
 
+                var parents = BuildParentsList(l.ParentId, parentLookup);
                 documents.Add(new BoundaryIndexDocument
                 {
                     Id = l.Id,
@@ -195,7 +246,8 @@ public class ElasticsearchIndexer
                     Latitude = l.Latitude,
                     Longitude = l.Longitude,
                     Population = l.Population,
-                    ParentChain = BuildParentChain(l.ParentName, l.GrandParentName),
+                    ParentChain = BuildParentChain(parents),
+                    Parents = parents,
                     Boundary = geoShape
                 });
             }
@@ -210,13 +262,5 @@ public class ElasticsearchIndexer
         }
 
         _logger.LogInformation("Boundary indexing complete: {Count:N0} documents", indexed);
-    }
-
-    private static string? BuildParentChain(string? parent, string? grandParent)
-    {
-        var parts = new List<string>();
-        if (!string.IsNullOrEmpty(parent)) parts.Add(parent);
-        if (!string.IsNullOrEmpty(grandParent)) parts.Add(grandParent);
-        return parts.Count > 0 ? string.Join(" > ", parts) : null;
     }
 }

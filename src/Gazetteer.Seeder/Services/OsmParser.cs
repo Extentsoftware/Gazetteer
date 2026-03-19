@@ -2,6 +2,7 @@ using Gazetteer.Core.Enums;
 using Gazetteer.Core.Models;
 using Microsoft.Extensions.Logging;
 using NetTopologySuite.Geometries;
+using Location = Gazetteer.Core.Models.Location;
 using OsmSharp;
 using OsmSharp.Streams;
 
@@ -129,17 +130,23 @@ public class OsmParser
         var cache = new GeometryCache();
         var wayNodeIds = new Dictionary<long, long[]>();
 
-        // Sub-pass 2a: collect node ID lists for boundary ways
-        _logger.LogInformation("Pass 2a: reading boundary ways to collect node references");
+        // Sub-pass 2a: collect node ID lists for boundary ways AND named highway ways
+        _logger.LogInformation("Pass 2a: reading ways to collect node references");
         {
             using var stream = File.OpenRead(pbfFilePath);
             var source = new PBFOsmStreamSource(stream);
 
             foreach (var osmGeo in source)
             {
-                if (osmGeo is Way way && way.Id.HasValue &&
-                    boundaryData.RequiredWayIds.Contains(way.Id.Value) &&
-                    way.Nodes != null && way.Nodes.Length > 0)
+                if (osmGeo is not Way way || !way.Id.HasValue || way.Nodes == null || way.Nodes.Length == 0)
+                    continue;
+
+                // Cache boundary member ways (for admin polygon assembly)
+                // AND named highway ways (so roads get coordinates)
+                var isBoundaryWay = boundaryData.RequiredWayIds.Contains(way.Id.Value);
+                var isNamedHighway = way.Tags != null && way.Tags.ContainsKey("highway") && way.Tags.ContainsKey("name");
+
+                if (isBoundaryWay || isNamedHighway)
                 {
                     wayNodeIds[way.Id.Value] = way.Nodes;
                 }
@@ -193,7 +200,7 @@ public class OsmParser
             }
 
             if (coords.Count >= 2)
-                cache.WayGeometries[wayId] = coords.ToArray();
+                cache.WayGeometries[wayId] = [.. coords];
         }
 
         // Build relation polygon geometries by assembling member ways
@@ -258,13 +265,13 @@ public class OsmParser
                         holes.Add(hole);
                 }
 
-                polygons.Add(_geometryFactory.CreatePolygon(shell, holes.ToArray()));
+                polygons.Add(_geometryFactory.CreatePolygon(shell, [.. holes]));
             }
 
             if (polygons.Count == 1)
                 return polygons[0];
 
-            return _geometryFactory.CreateMultiPolygon(polygons.ToArray());
+            return _geometryFactory.CreateMultiPolygon([.. polygons]);
         }
         catch (Exception ex)
         {
@@ -280,7 +287,7 @@ public class OsmParser
     /// </summary>
     private List<Coordinate[]> MergeWaySegments(List<Coordinate[]> segments)
     {
-        if (segments.Count == 0) return new List<Coordinate[]>();
+        if (segments.Count == 0) return [];
 
         var rings = new List<Coordinate[]>();
         var remaining = new List<Coordinate[]>(segments);
@@ -315,7 +322,7 @@ public class OsmParser
                     else if (CoordinatesMatch(currentEnd, segEnd))
                     {
                         // Append reversed segment
-                        current.AddRange(segment.Reverse().Skip(1));
+                        current.AddRange(segment.AsEnumerable().Reverse().Skip(1));
                         remaining.RemoveAt(i);
                         merged = true;
                         break;
@@ -333,7 +340,7 @@ public class OsmParser
                     else if (CoordinatesMatch(currentStart, segStart))
                     {
                         // Prepend reversed segment
-                        var prepend = segment.Reverse().Take(segment.Length - 1).ToList();
+                        var prepend = segment.AsEnumerable().Reverse().Take(segment.Length - 1).ToList();
                         prepend.AddRange(current);
                         current = prepend;
                         remaining.RemoveAt(i);
@@ -353,7 +360,7 @@ public class OsmParser
             }
 
             if (current.Count >= 4 && IsRingClosed(current))
-                rings.Add(current.ToArray());
+                rings.Add([.. current]);
         }
 
         return rings;
@@ -407,7 +414,7 @@ public class OsmParser
         if (locationType == null)
             return null;
 
-        var name = osmGeo.Tags.GetValueOrDefault("name") ?? string.Empty;
+        var name = osmGeo.Tags.TryGetValue("name", out var nameVal) ? nameVal : string.Empty;
         if (string.IsNullOrWhiteSpace(name))
             return null;
 
@@ -461,16 +468,16 @@ public class OsmParser
             OsmId = osmGeo.Id ?? 0,
             OsmType = osmType,
             Name = name,
-            LocalName = osmGeo.Tags.GetValueOrDefault("name:local"),
-            NameEn = osmGeo.Tags.GetValueOrDefault("name:en"),
+            LocalName = osmGeo.Tags.TryGetValue("name:local", out var localName) ? localName : null,
+            NameEn = osmGeo.Tags.TryGetValue("name:en", out var nameEn) ? nameEn : null,
             LocationType = locationType.Value,
             CountryCode = countryCode,
             Latitude = lat,
             Longitude = lon,
             Geometry = geometry,
-            Population = ParsePopulation(osmGeo.Tags.GetValueOrDefault("population")),
-            PostalCode = osmGeo.Tags.GetValueOrDefault("addr:postcode")
-                         ?? osmGeo.Tags.GetValueOrDefault("postal_code"),
+            Population = ParsePopulation(osmGeo.Tags.TryGetValue("population", out var pop) ? pop : null),
+            PostalCode = (osmGeo.Tags.TryGetValue("addr:postcode", out var postcode) ? postcode : null)
+                         ?? (osmGeo.Tags.TryGetValue("postal_code", out var postalCode) ? postalCode : null),
         };
 
         // Build alternate names from all name:* tags
@@ -518,7 +525,7 @@ public class OsmParser
     private static long? ParsePopulation(string? value)
     {
         if (string.IsNullOrWhiteSpace(value)) return null;
-        var cleaned = new string(value.Where(c => char.IsDigit(c)).ToArray());
+        var cleaned = new string([.. value.Where(c => char.IsDigit(c))]);
         return long.TryParse(cleaned, out var pop) ? pop : null;
     }
 
@@ -535,24 +542,24 @@ public class OsmParser
 
     // ---- Internal data structures ----
 
-    private class BoundaryData
+    private sealed class BoundaryData
     {
-        public HashSet<long> RequiredWayIds { get; } = new();
-        public HashSet<long> RequiredNodeIds { get; } = new();
-        public Dictionary<long, RelationMemberInfo> RelationMembers { get; } = new();
+        public HashSet<long> RequiredWayIds { get; } = [];
+        public HashSet<long> RequiredNodeIds { get; } = [];
+        public Dictionary<long, RelationMemberInfo> RelationMembers { get; } = [];
     }
 
-    private class RelationMemberInfo
+    private sealed class RelationMemberInfo
     {
-        public List<long> MemberWayIds { get; init; } = new();
-        public Dictionary<long, string> MemberRoles { get; init; } = new();
+        public List<long> MemberWayIds { get; init; } = [];
+        public Dictionary<long, string> MemberRoles { get; init; } = [];
         public long? AdminCentreNodeId { get; init; }
     }
 
-    private class GeometryCache
+    private sealed class GeometryCache
     {
-        public Dictionary<long, Coordinate[]> WayGeometries { get; } = new();
-        public Dictionary<long, Geometry> RelationGeometries { get; } = new();
-        public Dictionary<long, (double lat, double lon)> AdminCentreCoords { get; } = new();
+        public Dictionary<long, Coordinate[]> WayGeometries { get; } = [];
+        public Dictionary<long, Geometry> RelationGeometries { get; } = [];
+        public Dictionary<long, (double lat, double lon)> AdminCentreCoords { get; } = [];
     }
 }

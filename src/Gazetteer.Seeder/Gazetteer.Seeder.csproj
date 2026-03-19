@@ -6,13 +6,18 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Content Include="appsettings.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\Gazetteer.Core\Gazetteer.Core.csproj" />
     <ProjectReference Include="..\Gazetteer.Infrastructure\Gazetteer.Infrastructure.csproj" />
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="CommandLineParser" Version="2.9.1" />
-    <PackageReference Include="OsmSharp" Version="6.3.0" />
+<PackageReference Include="OsmSharp" Version="6.2.0" />
     <PackageReference Include="Npgsql" Version="9.0.0" />
     <PackageReference Include="Microsoft.Extensions.Hosting" Version="9.0.0" />
     <PackageReference Include="Microsoft.Extensions.Http" Version="9.0.0" />

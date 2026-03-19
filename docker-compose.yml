@@ -34,33 +34,33 @@ services:
       timeout: 5s
       retries: 10
 
-  api:
-    build:
-      context: .
-      dockerfile: Dockerfile.api
-    container_name: gazetteer-api
-    ports:
-      - "5100:8080"
-    environment:
-      - ConnectionStrings__DefaultConnection=Host=postgres;Database=gazetteer;Username=gazetteer;Password=gazetteer_dev
-      - Elasticsearch__Url=http://elasticsearch:9200
-    depends_on:
-      postgres:
-        condition: service_healthy
-      elasticsearch:
-        condition: service_healthy
+  # api:
+  #   build:
+  #     context: .
+  #     dockerfile: Dockerfile.api
+  #   container_name: gazetteer-api
+  #   ports:
+  #     - "5100:8080"
+  #   environment:
+  #     - ConnectionStrings__DefaultConnection=Host=postgres;Database=gazetteer;Username=gazetteer;Password=gazetteer_dev
+  #     - Elasticsearch__Url=http://elasticsearch:9200
+  #   depends_on:
+  #     postgres:
+  #       condition: service_healthy
+  #     elasticsearch:
+  #       condition: service_healthy
 
-  web:
-    build:
-      context: .
-      dockerfile: Dockerfile.web
-    container_name: gazetteer-web
-    ports:
-      - "5200:8080"
-    environment:
-      - ApiSettings__BaseUrl=http://api:8080
-    depends_on:
-      - api
+  # web:
+  #   build:
+  #     context: .
+  #     dockerfile: Dockerfile.web
+  #   container_name: gazetteer-web
+  #   ports:
+  #     - "5200:8080"
+  #   environment:
+  #     - ApiSettings__BaseUrl=http://api:8080
+  #   depends_on:
+  #     - api
 
 volumes:
   postgres_data:

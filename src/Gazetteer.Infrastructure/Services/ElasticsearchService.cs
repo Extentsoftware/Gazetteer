@@ -36,11 +36,11 @@ public class ElasticsearchService : IElasticsearchService
                     .Analyzers(an => an
                         .Custom("gazetteer_analyzer", ca => ca
                             .Tokenizer("standard")
-                            .Filter(new[] { "lowercase", "asciifolding", "gazetteer_edge_ngram" })
+                            .Filter(["lowercase", "asciifolding", "gazetteer_edge_ngram"])
                         )
                         .Custom("gazetteer_search_analyzer", ca => ca
                             .Tokenizer("standard")
-                            .Filter(new[] { "lowercase", "asciifolding" })
+                            .Filter(["lowercase", "asciifolding"])
                         )
                     )
                     .TokenFilters(tf => tf
@@ -52,8 +52,9 @@ public class ElasticsearchService : IElasticsearchService
                 )
             )
             .Mappings(m => m
-                .Properties(p => p
+                .Properties<LocationIndexDocument>(p => p
                     .LongNumber(d => d.Id)
+                    .LongNumber(d => d.OsmId)
                     .Text(d => d.Name, t => t
                         .Analyzer("gazetteer_analyzer")
                         .SearchAnalyzer("gazetteer_search_analyzer")
@@ -74,9 +75,17 @@ public class ElasticsearchService : IElasticsearchService
                     .Keyword(d => d.PostalCode)
                     .FloatNumber(d => d.Latitude)
                     .FloatNumber(d => d.Longitude)
-                    .GeoPoint(d => d.GeoPoint)
                     .LongNumber(d => d.Population)
                     .Text(d => d.ParentChain)
+                    .Nested(d => d.Parents, n => n
+                        .Properties(pp => pp
+                            .LongNumber("osmId")
+                            .Text("name")
+                            .Text("nameEn")
+                            .Text("localName")
+                            .Keyword("locationType")
+                        )
+                    )
                     .Boolean(d => d.HasGeometry)
                 )
             ),
@@ -96,12 +105,12 @@ public class ElasticsearchService : IElasticsearchService
     {
         var response = await _client.IndexAsync(document, idx => idx
             .Index(IndexName)
-            .Id(document.Id.ToString()),
+            .Id(document.OsmId.ToString()),
             ct
         );
 
         if (!response.IsValidResponse)
-            _logger.LogWarning("Failed to index document {Id}: {Error}", document.Id, response.DebugInformation);
+            _logger.LogWarning("Failed to index document {OsmId}: {Error}", document.OsmId, response.DebugInformation);
     }
 
     public async Task BulkIndexAsync(IEnumerable<LocationIndexDocument> documents, CancellationToken ct = default)
@@ -111,7 +120,7 @@ public class ElasticsearchService : IElasticsearchService
 
         var response = await _client.BulkAsync(b => b
             .Index(IndexName)
-            .IndexMany(batch),
+            .IndexMany(batch, (op, doc) => op.Id(doc.OsmId.ToString())),
             ct
         );
 
@@ -126,31 +135,40 @@ public class ElasticsearchService : IElasticsearchService
         }
     }
 
-    public async Task<List<LocationSearchHit>> SearchAsync(SearchRequest request, CancellationToken ct = default)
+    public async Task<List<LocationSearchHit>> SearchAsync(GazetteerSearchRequest request, CancellationToken ct = default)
     {
         var response = await _client.SearchAsync<LocationIndexDocument>(s =>
         {
             s.Index(IndexName)
              .Size(request.Limit)
              .Query(q => BuildQuery(q, request));
-
-            return s;
         }, ct);
 
         if (!response.IsValidResponse)
         {
             _logger.LogError("Search failed: {Error}", response.DebugInformation);
-            return new List<LocationSearchHit>();
+            return [];
         }
 
-        return response.Hits
+        return [.. response.Hits
             .Where(h => h.Source != null)
             .Select(h => new LocationSearchHit
             {
                 Id = h.Source!.Id,
+                OsmId = h.Source.OsmId,
+                Name = h.Source.Name,
+                NameEn = h.Source.NameEn,
+                LocationType = h.Source.LocationType,
+                CountryCode = h.Source.CountryCode,
+                PostalCode = h.Source.PostalCode,
+                Latitude = h.Source.Latitude,
+                Longitude = h.Source.Longitude,
+                Population = h.Source.Population,
+                HasGeometry = h.Source.HasGeometry,
+                ParentChain = h.Source.ParentChain,
+                Parents = h.Source.Parents,
                 Score = h.Score ?? 0
-            })
-            .ToList();
+            })];
     }
 
     public async Task DeleteIndexAsync(CancellationToken ct = default)
@@ -176,11 +194,11 @@ public class ElasticsearchService : IElasticsearchService
                     .Analyzers(an => an
                         .Custom("gazetteer_analyzer", ca => ca
                             .Tokenizer("standard")
-                            .Filter(new[] { "lowercase", "asciifolding", "boundary_edge_ngram" })
+                            .Filter(["lowercase", "asciifolding", "boundary_edge_ngram"])
                         )
                         .Custom("gazetteer_search_analyzer", ca => ca
                             .Tokenizer("standard")
-                            .Filter(new[] { "lowercase", "asciifolding" })
+                            .Filter(["lowercase", "asciifolding"])
                         )
                     )
                     .TokenFilters(tf => tf
@@ -213,6 +231,15 @@ public class ElasticsearchService : IElasticsearchService
                     .FloatNumber(d => d.Longitude)
                     .LongNumber(d => d.Population)
                     .Text(d => d.ParentChain)
+                    .Nested(d => d.Parents, n => n
+                        .Properties(pp => pp
+                            .LongNumber("osmId")
+                            .Text("name")
+                            .Text("nameEn")
+                            .Text("localName")
+                            .Keyword("locationType")
+                        )
+                    )
                     .GeoShape(d => d.Boundary)
                 )
             ),
@@ -235,7 +262,7 @@ public class ElasticsearchService : IElasticsearchService
 
         var response = await _client.BulkAsync(b => b
             .Index(BoundariesIndexName)
-            .IndexMany(batch),
+            .IndexMany(batch, (op, doc) => op.Id(doc.OsmId.ToString())),
             ct
         );
 
@@ -256,58 +283,77 @@ public class ElasticsearchService : IElasticsearchService
         _logger.LogInformation("Deleted Elasticsearch index '{Index}'", BoundariesIndexName);
     }
 
-    private static void BuildQuery(QueryDescriptor<LocationIndexDocument> q, SearchRequest request)
+    private static void BuildQuery(QueryDescriptor<LocationIndexDocument> q, GazetteerSearchRequest request)
     {
-        q.Bool(b =>
+        q.ScriptScore(ss =>
         {
-            b.Must(must =>
+            ss.Query(query => query.Bool(b =>
             {
-                must.Bool(innerBool =>
+                b.Must(must =>
                 {
-                    innerBool.Should(
-                        should => should.MultiMatch(mm => mm
-                            .Query(request.Query)
-                            .Fields(new[] { "name^3", "nameEn^2", "alternateNames", "postalCode^4", "parentChain" })
-                            .Fuzziness(new Fuzziness("AUTO"))
-                            .Type(TextQueryType.BestFields)
-                        ),
-                        should => should.MatchPhrasePrefix(mp => mp
-                            .Field(f => f.Name)
-                            .Query(request.Query)
-                            .Boost(5)
-                        ),
-                        should => should.Term(t => t
-                            .Field(f => f.PostalCode)
-                            .Value(request.Query.ToUpperInvariant())
-                            .Boost(10)
-                        )
-                    );
-                    innerBool.MinimumShouldMatch(1);
+                    must.Bool(innerBool =>
+                    {
+                        innerBool.Should(
+                            should => should.MultiMatch(mm => mm
+                                .Query(request.Query)
+                                .Fields(new[] { "name^3", "nameEn^2", "alternateNames", "postalCode^4", "parentChain" })
+                                .Fuzziness(new Fuzziness("AUTO"))
+                                .Type(TextQueryType.BestFields)
+                            ),
+                            should => should.Term(t => t
+                                .Field(f => f.PostalCode)
+                                .Value(request.Query.ToUpperInvariant())
+                                .Boost(10)
+                            )
+                        );
+                        innerBool.MinimumShouldMatch(1);
+                    });
                 });
-            });
 
-            var filters = new List<Action<QueryDescriptor<LocationIndexDocument>>>();
+                var filters = new List<Action<QueryDescriptor<LocationIndexDocument>>>();
 
-            if (!string.IsNullOrEmpty(request.CountryCode))
-            {
-                filters.Add(f => f.Term(t => t
-                    .Field(d => d.CountryCode)
-                    .Value(request.CountryCode.ToUpperInvariant())
-                ));
-            }
+                if (!string.IsNullOrEmpty(request.CountryCode))
+                {
+                    filters.Add(f => f.Term(t => t
+                        .Field(d => d.CountryCode)
+                        .Value(request.CountryCode.ToUpperInvariant())
+                    ));
+                }
 
-            if (request.LocationType.HasValue)
-            {
-                filters.Add(f => f.Term(t => t
-                    .Field(d => d.LocationType)
-                    .Value(request.LocationType.Value.ToString())
-                ));
-            }
+                if (request.LocationType.HasValue)
+                {
+                    filters.Add(f => f.Term(t => t
+                        .Field(d => d.LocationType)
+                        .Value(request.LocationType.Value.ToString())
+                    ));
+                }
 
-            if (filters.Count > 0)
-                b.Filter(filters.ToArray());
+                if (filters.Count > 0)
+                    b.Filter(filters.ToArray());
+            }));
 
-            return b;
+            ss.Script(script => script
+                .Source("""
+                    double typeBoost = 1.0;
+                    String type = doc['locationType'].value;
+                    if (type == 'Country') typeBoost = 10.0;
+                    else if (type == 'City') typeBoost = 6.0;
+                    else if (type == 'AdminRegion1') typeBoost = 5.0;
+                    else if (type == 'AdminRegion2') typeBoost = 5.0;
+                    else if (type == 'AdminRegion3') typeBoost = 4.0;
+                    else if (type == 'Town') typeBoost = 4.0;
+                    else if (type == 'Village') typeBoost = 3.0;
+                    else if (type == 'Neighborhood') typeBoost = 2.0;
+                    else if (type == 'Road') typeBoost = 0.3;
+
+                    double popBoost = 1.0;
+                    if (doc['population'].size() > 0 && doc['population'].value > 0) {
+                        popBoost = Math.log10(doc['population'].value) + 1;
+                    }
+
+                    return _score * typeBoost * popBoost;
+                    """)
+            );
         });
     }
 }

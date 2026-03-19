@@ -21,5 +21,5 @@ public class Location
     public string? PostalCode { get; set; }
     public long? ParentId { get; set; }
     public Location? Parent { get; set; }
-    public ICollection<Location> Children { get; set; } = new List<Location>();
+    public ICollection<Location> Children { get; set; } = [];
 }

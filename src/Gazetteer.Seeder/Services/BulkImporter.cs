@@ -17,6 +17,26 @@ public class BulkImporter
         _logger = logger;
     }
 
+    public async Task ClearLocationsForCountryAsync(string countryCode, CancellationToken ct = default)
+    {
+        using var scope = _serviceProvider.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<GazetteerDbContext>();
+
+        // Bulk deletes can be slow on large countries — extend timeout
+        db.Database.SetCommandTimeout(TimeSpan.FromMinutes(10));
+
+        // Clear parent references first to avoid FK constraint issues
+        await db.Locations
+            .Where(l => l.CountryCode == countryCode)
+            .ExecuteUpdateAsync(s => s.SetProperty(l => l.ParentId, (long?)null), ct);
+
+        var deleted = await db.Locations
+            .Where(l => l.CountryCode == countryCode)
+            .ExecuteDeleteAsync(ct);
+
+        _logger.LogInformation("Cleared {Count:N0} existing locations for {Country}", deleted, countryCode);
+    }
+
     public async Task ImportLocationsAsync(IEnumerable<Location> locations, int batchSize, CancellationToken ct = default)
     {
         var batch = new List<Location>(batchSize);

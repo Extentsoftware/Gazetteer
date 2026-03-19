@@ -2,7 +2,7 @@ using Gazetteer.Core.Enums;
 
 namespace Gazetteer.Core.DTOs;
 
-public class SearchRequest
+public class GazetteerSearchRequest
 {
     public string Query { get; set; } = string.Empty;
     public string? CountryCode { get; set; }

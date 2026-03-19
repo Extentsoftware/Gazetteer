@@ -1,4 +1,3 @@
-using CommandLine;
 using Gazetteer.Core.Interfaces;
 using Gazetteer.Core.Models;
 using Gazetteer.Infrastructure.Data;
@@ -17,6 +16,7 @@ builder.Configuration.AddJsonFile("appsettings.json", optional: true);
 builder.Configuration.AddEnvironmentVariables();
 
 builder.Services.AddGazetteerInfrastructure(builder.Configuration);
+builder.Services.Configure<SeederOptions>(builder.Configuration.GetSection("Seeder"));
 builder.Services.AddHttpClient<PbfDownloader>();
 builder.Services.AddTransient<PbfDownloader>();
 builder.Services.AddTransient<OsmParser>();
@@ -26,9 +26,9 @@ builder.Services.AddTransient<HierarchyBuilder>();
 
 var host = builder.Build();
 var logger = host.Services.GetRequiredService<ILogger<Program>>();
+var options = builder.Configuration.GetSection("Seeder").Get<SeederOptions>() ?? new SeederOptions();
 
-await Parser.Default.ParseArguments<SeederOptions>(args)
-    .WithParsedAsync(async options => await RunSeeder(host.Services, options, logger));
+await RunSeeder(host.Services, options, logger);
 
 async Task RunSeeder(IServiceProvider services, SeederOptions options, ILogger logger)
 {
@@ -85,6 +85,9 @@ async Task RunSeeder(IServiceProvider services, SeederOptions options, ILogger l
         // Step 2 & 3: Parse and Load
         if (steps.Contains("parse") || steps.Contains("load"))
         {
+            // Clear existing data for this country to avoid duplicates on re-run
+            await importer.ClearLocationsForCountryAsync(countryCode);
+
             var parser = services.GetRequiredService<OsmParser>();
             var locations = parser.Parse(pbfFilePath, countryCode);
             await importer.ImportLocationsAsync(locations, options.BatchSize);
