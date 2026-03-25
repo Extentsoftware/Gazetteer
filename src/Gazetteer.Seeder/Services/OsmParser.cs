@@ -148,19 +148,21 @@ public class OsmParser
     }
 
     /// <summary>
-    /// Pass 2: Two sub-passes to build geometry cache without storing all node coordinates.
-    ///   2a: Read ways referenced by boundary relations → collect their node ID lists
-    ///   2b: Read only the nodes referenced by those ways → collect coordinates
+    /// Pass 2: Three sub-passes to build geometry cache with minimal peak memory.
+    ///   2a: Read ways → collect required node IDs (no way node arrays stored)
+    ///   2b: Read nodes → collect coordinates for required nodes
+    ///   2c: Re-read ways → build geometries directly using node coordinates
     /// </summary>
     private GeometryCache BuildGeometryCache(string pbfFilePath, BoundaryData boundaryData)
     {
         var cache = new GeometryCache();
-        var wayNodeIds = new Dictionary<long, long[]>();
 
-        // Sub-pass 2a: collect node ID lists for boundary ways AND named highway ways
+        // Sub-pass 2a: collect required node IDs only (don't store per-way node arrays)
         // Also harvest addr:postcode from Ways (first node ID for coordinate resolution)
-        _logger.LogInformation("Pass 2a: reading ways to collect node references");
+        _logger.LogInformation("Pass 2a: reading ways to collect required node IDs");
+        var requiredNodeIds = new HashSet<long>(boundaryData.RequiredNodeIds);
         var postcodeWayNodes = new Dictionary<string, List<long>>(); // postcode -> list of first-node-ids
+        int matchedWayCount = 0;
         {
             using var stream = File.OpenRead(pbfFilePath);
             var source = new PBFOsmStreamSource(stream);
@@ -170,8 +172,6 @@ public class OsmParser
                 if (osmGeo is not Way way || !way.Id.HasValue || way.Nodes == null || way.Nodes.Length == 0)
                     continue;
 
-                // Cache boundary member ways (for admin polygon assembly)
-                // AND named highway ways (so roads get coordinates)
                 var isBoundaryWay = boundaryData.RequiredWayIds.Contains(way.Id.Value);
                 var isNamedHighway = way.Tags != null &&
                     way.Tags.TryGetValue("highway", out var hwVal) &&
@@ -185,7 +185,10 @@ public class OsmParser
 
                 if (isBoundaryWay || isNamedHighway || isAmenityWay)
                 {
-                    wayNodeIds[way.Id.Value] = way.Nodes;
+                    // Add node IDs directly to the set instead of storing the array
+                    foreach (var nodeId in way.Nodes)
+                        requiredNodeIds.Add(nodeId);
+                    matchedWayCount++;
                 }
 
                 // Harvest addr:postcode from Ways — store first node ID for later coordinate resolution
@@ -199,29 +202,15 @@ public class OsmParser
                             nodeList = new List<long>();
                             postcodeWayNodes[normalized] = nodeList;
                         }
-                        // Store first node of the way as representative coordinate
+                        requiredNodeIds.Add(way.Nodes[0]);
                         nodeList.Add(way.Nodes[0]);
                     }
                 }
             }
         }
 
-        // Build the set of node IDs we actually need (only boundary way nodes + admin centres)
-        var requiredNodeIds = new HashSet<long>(boundaryData.RequiredNodeIds);
-        // Also need nodes for postcode coordinate resolution
-        foreach (var nodeIds in postcodeWayNodes.Values)
-        {
-            foreach (var nodeId in nodeIds)
-                requiredNodeIds.Add(nodeId);
-        }
-        foreach (var nodeIds in wayNodeIds.Values)
-        {
-            foreach (var nodeId in nodeIds)
-                requiredNodeIds.Add(nodeId);
-        }
-
         _logger.LogInformation("Pass 2a complete: {Ways} ways referencing {Nodes} unique nodes",
-            wayNodeIds.Count, requiredNodeIds.Count);
+            matchedWayCount, requiredNodeIds.Count);
 
         // Sub-pass 2b: read only the nodes we need
         var nodeCoords = new Dictionary<long, (double lat, double lon)>(requiredNodeIds.Count);
@@ -230,6 +219,7 @@ public class OsmParser
             using var stream = File.OpenRead(pbfFilePath);
             var source = new PBFOsmStreamSource(stream);
             int found = 0;
+            int targetCount = requiredNodeIds.Count;
 
             foreach (var osmGeo in source)
             {
@@ -241,26 +231,55 @@ public class OsmParser
                     found++;
 
                     // Early exit once we have all needed nodes
-                    if (found == requiredNodeIds.Count) break;
+                    if (found == targetCount) break;
                 }
             }
         }
 
         _logger.LogInformation("Pass 2b complete: cached {Count} node coordinates", nodeCoords.Count);
 
-        // Build way line geometries
-        foreach (var (wayId, nodeIds) in wayNodeIds)
-        {
-            var coords = new List<Coordinate>();
-            foreach (var nodeId in nodeIds)
-            {
-                if (nodeCoords.TryGetValue(nodeId, out var coord))
-                    coords.Add(new Coordinate(coord.lon, coord.lat));
-            }
+        // Free the requiredNodeIds set — no longer needed, nodeCoords has the lookup
+        requiredNodeIds.Clear();
+        requiredNodeIds.TrimExcess();
 
-            if (coords.Count >= 2)
-                cache.WayGeometries[wayId] = [.. coords];
+        // Sub-pass 2c: re-read ways to build geometries directly using nodeCoords
+        _logger.LogInformation("Pass 2c: building way geometries");
+        {
+            using var stream = File.OpenRead(pbfFilePath);
+            var source = new PBFOsmStreamSource(stream);
+
+            foreach (var osmGeo in source)
+            {
+                if (osmGeo is not Way way || !way.Id.HasValue || way.Nodes == null || way.Nodes.Length == 0)
+                    continue;
+
+                var isBoundaryWay = boundaryData.RequiredWayIds.Contains(way.Id.Value);
+                var isNamedHighway = way.Tags != null &&
+                    way.Tags.TryGetValue("highway", out var hwVal) &&
+                    RoadHighwayTypes.Contains(hwVal) &&
+                    way.Tags.ContainsKey("name");
+                var isAmenityWay = way.Tags != null &&
+                    way.Tags.ContainsKey("name") &&
+                    ((way.Tags.TryGetValue("amenity", out var amVal) && ImportedAmenities.Contains(amVal)) ||
+                     (way.Tags.TryGetValue("aeroway", out var aeVal) && ImportedAeroways.Contains(aeVal)) ||
+                     (way.Tags.TryGetValue("railway", out var rwVal) && ImportedRailways.Contains(rwVal)));
+
+                if (isBoundaryWay || isNamedHighway || isAmenityWay)
+                {
+                    var coords = new List<Coordinate>();
+                    foreach (var nodeId in way.Nodes)
+                    {
+                        if (nodeCoords.TryGetValue(nodeId, out var coord))
+                            coords.Add(new Coordinate(coord.lon, coord.lat));
+                    }
+
+                    if (coords.Count >= 2)
+                        cache.WayGeometries[way.Id.Value] = [.. coords];
+                }
+            }
         }
+
+        _logger.LogInformation("Pass 2c complete: built {Count} way geometries", cache.WayGeometries.Count);
 
         // Build relation polygon geometries by assembling member ways
         foreach (var (relationId, memberInfo) in boundaryData.RelationMembers)
