@@ -25,7 +25,7 @@ public static class ServiceCollectionExtensions
         );
 
         // Elasticsearch
-        var esUrl = configuration["Elasticsearch:Url"] ?? "http://localhost:9200";
+        var esUrl = configuration["Elasticsearch:Url"] ?? "http://127.0.0.1:9200";
         var settings = new ElasticsearchClientSettings(new Uri(esUrl))
             .DefaultIndex("locations")
             .EnableDebugMode();

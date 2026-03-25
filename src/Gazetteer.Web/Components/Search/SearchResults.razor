@@ -26,7 +26,7 @@ else if (Results.Count > 0)
                     </div>
                     <div class="text-end">
                         <span class="badge @GetTypeBadgeClass(result.LocationType)">
-                            @result.LocationType
+                            @FormatLocationType(result)
                         </span>
                         @if (!string.IsNullOrEmpty(result.PostalCode))
                         {
@@ -61,8 +61,40 @@ else if (Results.Count == 0 && SelectedId == null)
         LocationType.Town => "bg-info text-dark",
         LocationType.Village => "bg-success",
         LocationType.Neighborhood => "bg-secondary",
-        LocationType.Postcode => "bg-dark",
+        LocationType.Postcode or LocationType.PostcodeDistrict or LocationType.PostcodeArea => "bg-dark",
         LocationType.Road => "bg-light text-dark border",
+        LocationType.Amenity => "bg-info",
         _ => "bg-secondary"
     };
+
+    private static string FormatLocationType(SearchResultDto result)
+    {
+        if (result.LocationType == LocationType.Amenity && !string.IsNullOrEmpty(result.SubType))
+        {
+            return result.SubType switch
+            {
+                "hospital" => "Hospital",
+                "clinic" => "Clinic",
+                "doctors" => "Doctors",
+                "pharmacy" => "Pharmacy",
+                "school" => "School",
+                "university" => "University",
+                "college" => "College",
+                "kindergarten" => "Kindergarten",
+                "place_of_worship" => "Place of Worship",
+                "library" => "Library",
+                "community_centre" => "Community Centre",
+                "police" => "Police Station",
+                "fire_station" => "Fire Station",
+                "courthouse" => "Courthouse",
+                "townhall" => "Town Hall",
+                "post_office" => "Post Office",
+                "aerodrome" => "Airport",
+                "station" => "Railway Station",
+                "halt" => "Railway Halt",
+                _ => result.SubType
+            };
+        }
+        return result.LocationType.ToString();
+    }
 }

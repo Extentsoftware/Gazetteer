@@ -2,6 +2,7 @@
 using Gazetteer.Infrastructure.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using NetTopologySuite.Geometries;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
@@ -11,9 +12,11 @@ using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 namespace Gazetteer.Infrastructure.Migrations
 {
     [DbContext(typeof(GazetteerDbContext))]
-    partial class GazetteerDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260324073023_PostalCodeToText")]
+    partial class PostalCodeToText
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -121,11 +124,6 @@ namespace Gazetteer.Infrastructure.Migrations
                     b.Property<string>("PostalCode")
                         .HasColumnType("text")
                         .HasColumnName("postal_code");
-
-                    b.Property<string>("SubType")
-                        .HasMaxLength(100)
-                        .HasColumnType("character varying(100)")
-                        .HasColumnName("sub_type");
 
                     b.HasKey("Id");
 

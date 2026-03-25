@@ -12,5 +12,8 @@ public enum LocationType
     Neighborhood,
     Locality,
     Postcode,
-    Road
+    PostcodeDistrict,
+    PostcodeArea,
+    Road,
+    Amenity
 }

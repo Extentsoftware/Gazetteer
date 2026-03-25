@@ -34,6 +34,7 @@ public class LocationIndexDocument
     public string? AlternateNames { get; set; }
     public string LocationType { get; set; } = string.Empty;
     public string CountryCode { get; set; } = string.Empty;
+    public string? SubType { get; set; }
     public string? PostalCode { get; set; }
     public double Latitude { get; set; }
     public double Longitude { get; set; }
@@ -70,6 +71,7 @@ public class LocationSearchHit
     public string Name { get; set; } = string.Empty;
     public string? NameEn { get; set; }
     public string LocationType { get; set; } = string.Empty;
+    public string? SubType { get; set; }
     public string CountryCode { get; set; } = string.Empty;
     public string? PostalCode { get; set; }
     public double Latitude { get; set; }

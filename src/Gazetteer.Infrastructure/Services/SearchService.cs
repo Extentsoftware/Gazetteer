@@ -41,8 +41,9 @@ public class SearchService : ISearchService
         var results = hits.Select(hit => new SearchResultDto
         {
             Id = hit.Id,
-            Name = hit.Name,
+            Name = !string.IsNullOrEmpty(hit.NameEn) && hit.Name != hit.NameEn ? hit.NameEn : hit.Name,
             LocationType = Enum.TryParse<Core.Enums.LocationType>(hit.LocationType, out var lt) ? lt : Core.Enums.LocationType.Locality,
+            SubType = hit.SubType,
             CountryCode = hit.CountryCode,
             Latitude = hit.Latitude,
             Longitude = hit.Longitude,

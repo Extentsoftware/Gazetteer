@@ -13,6 +13,29 @@ public class OsmParser
     private readonly ILogger<OsmParser> _logger;
     private readonly GeometryFactory _geometryFactory = new(new PrecisionModel(), 4326);
 
+    // Road-type highway values (exclude bus_stop, traffic_signals, platform, etc.)
+    private static readonly HashSet<string> RoadHighwayTypes = new()
+    {
+        "motorway", "trunk", "primary", "secondary", "tertiary",
+        "residential", "unclassified", "service", "living_street",
+        "pedestrian", "track", "footway", "cycleway", "bridleway", "path",
+        "motorway_link", "trunk_link", "primary_link", "secondary_link", "tertiary_link"
+    };
+
+    // Key amenity/aeroway/railway values to import
+    private static readonly HashSet<string> ImportedAmenities = new()
+    {
+        "hospital", "clinic", "doctors", "pharmacy",
+        "school", "university", "college", "kindergarten",
+        "place_of_worship", "library", "community_centre",
+        "police", "fire_station", "courthouse",
+        "townhall", "post_office"
+    };
+
+    private static readonly HashSet<string> ImportedAeroways = new() { "aerodrome" };
+
+    private static readonly HashSet<string> ImportedRailways = new() { "station", "halt" };
+
     private static readonly Dictionary<string, LocationType> PlaceTagMapping = new()
     {
         ["country"] = LocationType.Country,
@@ -29,6 +52,7 @@ public class OsmParser
         ["suburb"] = LocationType.Neighborhood,
         ["neighbourhood"] = LocationType.Neighborhood,
         ["quarter"] = LocationType.Neighborhood,
+        ["postcode"] = LocationType.Postcode,
         ["locality"] = LocationType.Locality,
         ["isolated_dwelling"] = LocationType.Locality,
     };
@@ -42,6 +66,9 @@ public class OsmParser
         ["6"] = LocationType.AdminRegion2,
         ["7"] = LocationType.AdminRegion3,
         ["8"] = LocationType.AdminRegion3,
+        ["9"] = LocationType.Neighborhood,
+        ["10"] = LocationType.Neighborhood,
+        ["11"] = LocationType.Neighborhood,
     };
 
     public OsmParser(ILogger<OsmParser> logger)
@@ -131,7 +158,9 @@ public class OsmParser
         var wayNodeIds = new Dictionary<long, long[]>();
 
         // Sub-pass 2a: collect node ID lists for boundary ways AND named highway ways
+        // Also harvest addr:postcode from Ways (first node ID for coordinate resolution)
         _logger.LogInformation("Pass 2a: reading ways to collect node references");
+        var postcodeWayNodes = new Dictionary<string, List<long>>(); // postcode -> list of first-node-ids
         {
             using var stream = File.OpenRead(pbfFilePath);
             var source = new PBFOsmStreamSource(stream);
@@ -144,17 +173,47 @@ public class OsmParser
                 // Cache boundary member ways (for admin polygon assembly)
                 // AND named highway ways (so roads get coordinates)
                 var isBoundaryWay = boundaryData.RequiredWayIds.Contains(way.Id.Value);
-                var isNamedHighway = way.Tags != null && way.Tags.ContainsKey("highway") && way.Tags.ContainsKey("name");
+                var isNamedHighway = way.Tags != null &&
+                    way.Tags.TryGetValue("highway", out var hwVal) &&
+                    RoadHighwayTypes.Contains(hwVal) &&
+                    way.Tags.ContainsKey("name");
+                var isAmenityWay = way.Tags != null &&
+                    way.Tags.ContainsKey("name") &&
+                    ((way.Tags.TryGetValue("amenity", out var amVal) && ImportedAmenities.Contains(amVal)) ||
+                     (way.Tags.TryGetValue("aeroway", out var aeVal) && ImportedAeroways.Contains(aeVal)) ||
+                     (way.Tags.TryGetValue("railway", out var rwVal) && ImportedRailways.Contains(rwVal)));
 
-                if (isBoundaryWay || isNamedHighway)
+                if (isBoundaryWay || isNamedHighway || isAmenityWay)
                 {
                     wayNodeIds[way.Id.Value] = way.Nodes;
+                }
+
+                // Harvest addr:postcode from Ways — store first node ID for later coordinate resolution
+                if (way.Tags != null && way.Tags.TryGetValue("addr:postcode", out var wayPostcode))
+                {
+                    var normalized = wayPostcode.Trim().ToUpperInvariant();
+                    if (!string.IsNullOrEmpty(normalized))
+                    {
+                        if (!postcodeWayNodes.TryGetValue(normalized, out var nodeList))
+                        {
+                            nodeList = new List<long>();
+                            postcodeWayNodes[normalized] = nodeList;
+                        }
+                        // Store first node of the way as representative coordinate
+                        nodeList.Add(way.Nodes[0]);
+                    }
                 }
             }
         }
 
         // Build the set of node IDs we actually need (only boundary way nodes + admin centres)
         var requiredNodeIds = new HashSet<long>(boundaryData.RequiredNodeIds);
+        // Also need nodes for postcode coordinate resolution
+        foreach (var nodeIds in postcodeWayNodes.Values)
+        {
+            foreach (var nodeId in nodeIds)
+                requiredNodeIds.Add(nodeId);
+        }
         foreach (var nodeIds in wayNodeIds.Values)
         {
             foreach (var nodeId in nodeIds)
@@ -217,6 +276,26 @@ public class OsmParser
                 cache.AdminCentreCoords[relationId] = centreCoord;
             }
         }
+
+        // Resolve postcode Way coordinates into the cache
+        foreach (var (postcode, nodeIds) in postcodeWayNodes)
+        {
+            double sumLat = 0, sumLon = 0;
+            int count = 0;
+            foreach (var nodeId in nodeIds)
+            {
+                if (nodeCoords.TryGetValue(nodeId, out var coord))
+                {
+                    sumLat += coord.lat;
+                    sumLon += coord.lon;
+                    count++;
+                }
+            }
+            if (count > 0)
+                cache.PostcodeWayCoords[postcode] = (sumLat / count, sumLon / count, count);
+        }
+
+        _logger.LogInformation("Resolved coordinates for {Count} postcodes from Ways", cache.PostcodeWayCoords.Count);
 
         return cache;
     }
@@ -385,6 +464,12 @@ public class OsmParser
 
         long nodeCount = 0;
         long extractedCount = 0;
+        var roadGroups = new Dictionary<string, List<Location>>();
+        // Buffer places for deduplication (same name+type appears as both Node and Relation)
+        var placeGroups = new Dictionary<string, List<Location>>();
+        // Harvest unique postcodes from addr:postcode tags (keyed by normalized postcode)
+        var harvestedPostcodes = new Dictionary<string, (double Lat, double Lon, int Count)>();
+        var knownPostcodes = new HashSet<string>(); // Track postcodes already emitted as place=postcode entities
 
         foreach (var osmGeo in source)
         {
@@ -393,16 +478,281 @@ public class OsmParser
                 _logger.LogInformation("  Processed {Count:N0} OSM elements, extracted {Extracted:N0} locations",
                     nodeCount, extractedCount);
 
-            var location = TryExtractLocation(osmGeo, countryCode, geometryCache);
-            if (location != null)
+            // Harvest addr:postcode from ANY element with coordinates (for postcode synthesis)
+            if (osmGeo.Tags != null && osmGeo.Tags.TryGetValue("addr:postcode", out var addrPostcode))
             {
-                extractedCount++;
+                var normalized = addrPostcode.Trim().ToUpperInvariant();
+                if (!string.IsNullOrEmpty(normalized))
+                {
+                    double pcLat = 0, pcLon = 0;
+                    if (osmGeo is Node pcNode && pcNode.Latitude.HasValue && pcNode.Longitude.HasValue)
+                    {
+                        pcLat = pcNode.Latitude.Value;
+                        pcLon = pcNode.Longitude.Value;
+                    }
+
+                    if (harvestedPostcodes.TryGetValue(normalized, out var existing))
+                    {
+                        // Running average of coordinates
+                        if (pcLat != 0 || pcLon != 0)
+                        {
+                            var newCount = existing.Count + 1;
+                            var newLat = existing.Lat + (pcLat - existing.Lat) / newCount;
+                            var newLon = existing.Lon + (pcLon - existing.Lon) / newCount;
+                            harvestedPostcodes[normalized] = (newLat, newLon, newCount);
+                        }
+                    }
+                    else
+                    {
+                        harvestedPostcodes[normalized] = (pcLat, pcLon, 1);
+                    }
+                }
+            }
+
+            var location = TryExtractLocation(osmGeo, countryCode, geometryCache);
+            if (location == null) continue;
+
+            extractedCount++;
+
+            if (location.LocationType == LocationType.Road)
+            {
+                var key = location.Name.ToUpperInvariant();
+                if (!roadGroups.TryGetValue(key, out var group))
+                {
+                    group = new List<Location>();
+                    roadGroups[key] = group;
+                }
+                group.Add(location);
+            }
+            else if (location.LocationType == LocationType.Postcode)
+            {
+                // Track postcodes — emit immediately (no dedup needed, they have unique names)
+                if (!string.IsNullOrEmpty(location.PostalCode))
+                    knownPostcodes.Add(location.PostalCode.Trim().ToUpperInvariant());
+
                 yield return location;
+            }
+            else
+            {
+                // Buffer places for deduplication (same place as Node + Relation)
+                var placeKey = $"{location.Name.ToUpperInvariant()}|{location.LocationType}";
+                if (!placeGroups.TryGetValue(placeKey, out var placeGroup))
+                {
+                    placeGroup = new List<Location>();
+                    placeGroups[placeKey] = placeGroup;
+                }
+                placeGroup.Add(location);
             }
         }
 
-        _logger.LogInformation("Finished parsing {File}: {Total:N0} elements, {Extracted:N0} locations",
-            pbfFilePath, nodeCount, extractedCount);
+        // Deduplicate places (same name+type as both Node and Relation)
+        _logger.LogInformation("Deduplicating {Groups:N0} place groups from {Total:N0} place entries",
+            placeGroups.Count, placeGroups.Values.Sum(g => g.Count));
+
+        foreach (var (_, group) in placeGroups)
+        {
+            yield return PickBestPlace(group);
+        }
+
+        // Merge road segments with the same name into single entries
+        _logger.LogInformation("Merging {Groups:N0} unique road names from {Total:N0} road segments",
+            roadGroups.Count, roadGroups.Values.Sum(g => g.Count));
+
+        foreach (var (_, segments) in roadGroups)
+        {
+            // Sub-cluster by geographic proximity — same name doesn't mean same road
+            foreach (var cluster in ClusterByProximity(segments, maxDistanceKm: 2.0))
+            {
+                yield return MergeRoadSegments(cluster);
+            }
+        }
+
+        // Merge Way-harvested postcode coordinates into the running averages
+        foreach (var (code, wayCoord) in geometryCache.PostcodeWayCoords)
+        {
+            if (harvestedPostcodes.TryGetValue(code, out var existing))
+            {
+                // Only update if the existing entry has no coordinates
+                if (existing.Lat == 0 && existing.Lon == 0)
+                    harvestedPostcodes[code] = (wayCoord.Lat, wayCoord.Lon, existing.Count + wayCoord.Count);
+                // else keep the Node-based average (more accurate, from actual addresses)
+            }
+            else
+            {
+                harvestedPostcodes[code] = (wayCoord.Lat, wayCoord.Lon, wayCoord.Count);
+            }
+        }
+
+        // Emit harvested postcodes that weren't already extracted as proper place=postcode entities
+        var newPostcodes = harvestedPostcodes
+            .Where(kv => !knownPostcodes.Contains(kv.Key))
+            .ToList();
+
+        _logger.LogInformation("Harvested {Total:N0} unique postcodes from addr:postcode tags, {New:N0} are new",
+            harvestedPostcodes.Count, newPostcodes.Count);
+
+        long syntheticPostcodeId = -2_000_000_000L;
+        foreach (var (code, coords) in newPostcodes)
+        {
+            yield return new Location
+            {
+                OsmId = syntheticPostcodeId--,
+                OsmType = OsmType.Synthetic,
+                Name = code,
+                LocationType = LocationType.Postcode,
+                CountryCode = countryCode,
+                Latitude = coords.Lat,
+                Longitude = coords.Lon,
+                PostalCode = code
+            };
+        }
+
+        _logger.LogInformation("Finished parsing {File}: {Total:N0} elements, {Extracted:N0} locations, {Postcodes:N0} harvested postcodes",
+            pbfFilePath, nodeCount, extractedCount, newPostcodes.Count);
+    }
+
+    private static Location MergeRoadSegments(List<Location> segments)
+    {
+        var first = segments[0];
+        if (segments.Count == 1) return first;
+
+        // Average centroid from all segments with valid coordinates
+        var withCoords = segments.Where(s => s.Latitude != 0 || s.Longitude != 0).ToList();
+        if (withCoords.Count > 0)
+        {
+            first.Latitude = withCoords.Average(s => s.Latitude);
+            first.Longitude = withCoords.Average(s => s.Longitude);
+        }
+
+        // Merge unique postal codes
+        var postcodes = segments
+            .Where(s => !string.IsNullOrEmpty(s.PostalCode))
+            .SelectMany(s => s.PostalCode!.Split(';'))
+            .Distinct()
+            .ToList();
+        if (postcodes.Count > 0)
+            first.PostalCode = string.Join(";", postcodes);
+
+        // Merge unique alternate names
+        var altNames = segments
+            .Where(s => !string.IsNullOrEmpty(s.AlternateNames))
+            .SelectMany(s => s.AlternateNames!.Split(';'))
+            .Distinct()
+            .ToList();
+        if (altNames.Count > 0)
+            first.AlternateNames = string.Join(";", altNames);
+
+        // Use first available LocalName/NameEn
+        first.LocalName ??= segments.FirstOrDefault(s => s.LocalName != null)?.LocalName;
+        first.NameEn ??= segments.FirstOrDefault(s => s.NameEn != null)?.NameEn;
+
+        return first;
+    }
+
+    /// <summary>
+    /// Picks the best representative from duplicate place entries (e.g., Node + Relation for same town).
+    /// Prefers: Relation > Way > Node (relations have boundaries/geometry).
+    /// Merges coordinates and alternate names from all duplicates.
+    /// </summary>
+    private static Location PickBestPlace(List<Location> duplicates)
+    {
+        if (duplicates.Count == 1) return duplicates[0];
+
+        // Prefer Relation (has geometry), then Way, then Node
+        var best = duplicates
+            .OrderByDescending(d => d.OsmType switch
+            {
+                OsmType.Relation => 3,
+                OsmType.Way => 2,
+                OsmType.Node => 1,
+                _ => 0
+            })
+            .ThenByDescending(d => d.Geometry != null) // prefer one with geometry
+            .ThenByDescending(d => d.Latitude != 0 || d.Longitude != 0) // prefer one with coords
+            .ThenByDescending(d => d.Population ?? 0) // prefer one with population
+            .First();
+
+        // If the best doesn't have coordinates, grab from another
+        if (best.Latitude == 0 && best.Longitude == 0)
+        {
+            var withCoords = duplicates.FirstOrDefault(d => d.Latitude != 0 || d.Longitude != 0);
+            if (withCoords != null)
+            {
+                best.Latitude = withCoords.Latitude;
+                best.Longitude = withCoords.Longitude;
+            }
+        }
+
+        // Merge alternate names from all duplicates
+        var allAltNames = duplicates
+            .Where(d => !string.IsNullOrEmpty(d.AlternateNames))
+            .SelectMany(d => d.AlternateNames!.Split(';'))
+            .Distinct()
+            .ToList();
+        if (allAltNames.Count > 0)
+            best.AlternateNames = string.Join(";", allAltNames);
+
+        // Use first available fields from any duplicate
+        best.LocalName ??= duplicates.FirstOrDefault(d => d.LocalName != null)?.LocalName;
+        best.NameEn ??= duplicates.FirstOrDefault(d => d.NameEn != null)?.NameEn;
+        best.Population ??= duplicates.FirstOrDefault(d => d.Population.HasValue)?.Population;
+        best.PostalCode ??= duplicates.FirstOrDefault(d => d.PostalCode != null)?.PostalCode;
+
+        return best;
+    }
+
+    /// <summary>
+    /// Clusters road segments by geographic proximity so that roads with the same name
+    /// in different areas (e.g., "High Beeches" in Orpington vs Buckinghamshire) stay separate.
+    /// </summary>
+    private static List<List<Location>> ClusterByProximity(List<Location> segments, double maxDistanceKm)
+    {
+        var clusters = new List<List<Location>>();
+
+        foreach (var segment in segments)
+        {
+            if (segment.Latitude == 0 && segment.Longitude == 0)
+            {
+                // No coords — can't cluster, emit as standalone
+                clusters.Add(new List<Location> { segment });
+                continue;
+            }
+
+            List<Location>? bestCluster = null;
+            double bestDist = double.MaxValue;
+
+            foreach (var cluster in clusters)
+            {
+                foreach (var member in cluster)
+                {
+                    if (member.Latitude == 0 && member.Longitude == 0) continue;
+                    var dist = HaversineKm(segment.Latitude, segment.Longitude, member.Latitude, member.Longitude);
+                    if (dist < bestDist)
+                    {
+                        bestDist = dist;
+                        bestCluster = cluster;
+                    }
+                }
+            }
+
+            if (bestCluster != null && bestDist <= maxDistanceKm)
+                bestCluster.Add(segment);
+            else
+                clusters.Add(new List<Location> { segment });
+        }
+
+        return clusters;
+    }
+
+    private static double HaversineKm(double lat1, double lon1, double lat2, double lon2)
+    {
+        const double R = 6371.0;
+        var dLat = (lat2 - lat1) * Math.PI / 180;
+        var dLon = (lon2 - lon1) * Math.PI / 180;
+        var a = Math.Sin(dLat / 2) * Math.Sin(dLat / 2) +
+                Math.Cos(lat1 * Math.PI / 180) * Math.Cos(lat2 * Math.PI / 180) *
+                Math.Sin(dLon / 2) * Math.Sin(dLon / 2);
+        return R * 2 * Math.Atan2(Math.Sqrt(a), Math.Sqrt(1 - a));
     }
 
     private Location? TryExtractLocation(OsmGeo osmGeo, string countryCode, GeometryCache geometryCache)
@@ -438,6 +788,20 @@ public class OsmParser
                     var centroid = ComputeCentroid(wayCoords);
                     lat = centroid.lat;
                     lon = centroid.lon;
+
+                    // Build polygon for closed ways (amenities, buildings)
+                    if (wayCoords.Length >= 4 &&
+                        wayCoords[0].Equals2D(wayCoords[^1]))
+                    {
+                        try
+                        {
+                            geometry = _geometryFactory.CreatePolygon(wayCoords);
+                        }
+                        catch
+                        {
+                            // Invalid polygon — skip geometry, keep centroid
+                        }
+                    }
                 }
                 break;
 
@@ -477,8 +841,20 @@ public class OsmParser
             Geometry = geometry,
             Population = ParsePopulation(osmGeo.Tags.TryGetValue("population", out var pop) ? pop : null),
             PostalCode = (osmGeo.Tags.TryGetValue("addr:postcode", out var postcode) ? postcode : null)
-                         ?? (osmGeo.Tags.TryGetValue("postal_code", out var postalCode) ? postalCode : null),
+                         ?? (osmGeo.Tags.TryGetValue("postal_code", out var postalCode) ? postalCode : null)
+                         ?? (locationType.Value == LocationType.Postcode ? name : null),
         };
+
+        // Set SubType for amenities
+        if (locationType.Value == LocationType.Amenity)
+        {
+            if (osmGeo.Tags.TryGetValue("amenity", out var amenityVal))
+                location.SubType = amenityVal;
+            else if (osmGeo.Tags.TryGetValue("aeroway", out var aerowayVal))
+                location.SubType = aerowayVal;
+            else if (osmGeo.Tags.TryGetValue("railway", out var railwayVal))
+                location.SubType = railwayVal;
+        }
 
         // Build alternate names from all name:* tags
         var alternates = osmGeo.Tags
@@ -515,9 +891,22 @@ public class OsmParser
             }
         }
 
-        // Check named roads
-        if (osmGeo.Tags.ContainsKey("highway") && osmGeo.Tags.ContainsKey("name"))
+        // Check named roads (only actual road types, not bus stops, traffic signals, etc.)
+        if (osmGeo.Tags.TryGetValue("highway", out var hwType) &&
+            osmGeo.Tags.ContainsKey("name") &&
+            RoadHighwayTypes.Contains(hwType))
             return LocationType.Road;
+
+        // Check key amenities (hospitals, schools, etc.)
+        if (osmGeo.Tags.ContainsKey("name"))
+        {
+            if (osmGeo.Tags.TryGetValue("amenity", out var amenity) && ImportedAmenities.Contains(amenity))
+                return LocationType.Amenity;
+            if (osmGeo.Tags.TryGetValue("aeroway", out var aeroway) && ImportedAeroways.Contains(aeroway))
+                return LocationType.Amenity;
+            if (osmGeo.Tags.TryGetValue("railway", out var railway) && ImportedRailways.Contains(railway))
+                return LocationType.Amenity;
+        }
 
         return null;
     }
@@ -561,5 +950,6 @@ public class OsmParser
         public Dictionary<long, Coordinate[]> WayGeometries { get; } = [];
         public Dictionary<long, Geometry> RelationGeometries { get; } = [];
         public Dictionary<long, (double lat, double lon)> AdminCentreCoords { get; } = [];
+        public Dictionary<string, (double Lat, double Lon, int Count)> PostcodeWayCoords { get; } = [];
     }
 }

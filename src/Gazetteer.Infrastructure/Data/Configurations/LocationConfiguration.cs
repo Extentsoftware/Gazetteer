@@ -19,12 +19,13 @@ public class LocationConfiguration : IEntityTypeConfiguration<Location>
         builder.Property(l => l.NameEn).HasColumnName("name_en").HasMaxLength(500);
         builder.Property(l => l.AlternateNames).HasColumnName("alternate_names").HasColumnType("text");
         builder.Property(l => l.LocationType).HasColumnName("location_type").HasConversion<string>();
+        builder.Property(l => l.SubType).HasColumnName("sub_type").HasMaxLength(100);
         builder.Property(l => l.CountryCode).HasColumnName("country_code").HasMaxLength(2).IsRequired();
         builder.Property(l => l.Latitude).HasColumnName("latitude");
         builder.Property(l => l.Longitude).HasColumnName("longitude");
         builder.Property(l => l.Geometry).HasColumnName("geometry").HasColumnType("geometry");
         builder.Property(l => l.Population).HasColumnName("population");
-        builder.Property(l => l.PostalCode).HasColumnName("postal_code").HasMaxLength(50);
+        builder.Property(l => l.PostalCode).HasColumnName("postal_code").HasColumnType("text");
         builder.Property(l => l.ParentId).HasColumnName("parent_id");
 
         builder.HasOne(l => l.Parent)

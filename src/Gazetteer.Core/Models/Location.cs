@@ -13,6 +13,7 @@ public class Location
     public string? NameEn { get; set; }
     public string? AlternateNames { get; set; }
     public LocationType LocationType { get; set; }
+    public string? SubType { get; set; }
     public string CountryCode { get; set; } = string.Empty;
     public double Latitude { get; set; }
     public double Longitude { get; set; }

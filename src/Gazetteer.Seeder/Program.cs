@@ -23,6 +23,7 @@ builder.Services.AddTransient<OsmParser>();
 builder.Services.AddTransient<BulkImporter>();
 builder.Services.AddTransient<ElasticsearchIndexer>();
 builder.Services.AddTransient<HierarchyBuilder>();
+builder.Services.AddTransient<PostcodeSynthesizer>();
 
 var host = builder.Build();
 var logger = host.Services.GetRequiredService<ILogger<Program>>();
@@ -38,8 +39,7 @@ async Task RunSeeder(IServiceProvider services, SeederOptions options, ILogger l
 
     var countryCodes = CountryConfig.ParseCountryCodes(options.Countries).ToList();
     logger.LogInformation("Processing countries: {Countries}", string.Join(", ", countryCodes));
-    logger.LogInformation("Steps: {Steps}", string.Join(", ", steps));
-
+    
     // Ensure database is created
     using (var scope = services.CreateScope())
     {
@@ -98,6 +98,10 @@ async Task RunSeeder(IServiceProvider services, SeederOptions options, ILogger l
         {
             var hierarchyBuilder = services.GetRequiredService<HierarchyBuilder>();
             await hierarchyBuilder.BuildHierarchyAsync(countryCode);
+
+            // Synthesize postcode districts/areas after hierarchy is built (so parents are available)
+            var postcodeSynthesizer = services.GetRequiredService<PostcodeSynthesizer>();
+            await postcodeSynthesizer.SynthesizeAsync(countryCode);
         }
     }
 

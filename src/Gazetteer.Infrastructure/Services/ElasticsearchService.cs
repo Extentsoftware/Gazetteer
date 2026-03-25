@@ -49,6 +49,11 @@ public class ElasticsearchService : IElasticsearchService
                             .MaxGram(15)
                         )
                     )
+                    .Normalizers(n => n
+                        .Custom("lowercase_normalizer", cn => cn
+                            .Filter(["lowercase", "asciifolding"])
+                        )
+                    )
                 )
             )
             .Mappings(m => m
@@ -59,7 +64,9 @@ public class ElasticsearchService : IElasticsearchService
                         .Analyzer("gazetteer_analyzer")
                         .SearchAnalyzer("gazetteer_search_analyzer")
                         .Fields(f => f
-                            .Keyword(k => k.Name!.Suffix("raw"))
+                            .Keyword(k => k.Name!.Suffix("raw"), kd => kd
+                                .Normalizer("lowercase_normalizer")
+                            )
                         )
                     )
                     .Text(d => d.NameEn, t => t
@@ -159,6 +166,7 @@ public class ElasticsearchService : IElasticsearchService
                 Name = h.Source.Name,
                 NameEn = h.Source.NameEn,
                 LocationType = h.Source.LocationType,
+                SubType = h.Source.SubType,
                 CountryCode = h.Source.CountryCode,
                 PostalCode = h.Source.PostalCode,
                 Latitude = h.Source.Latitude,
@@ -285,76 +293,166 @@ public class ElasticsearchService : IElasticsearchService
 
     private static void BuildQuery(QueryDescriptor<LocationIndexDocument> q, GazetteerSearchRequest request)
     {
-        q.ScriptScore(ss =>
+        // Parse comma-separated query: "heathway, chaldon" → name="heathway", qualifier="chaldon"
+        var (nameQuery, locationQualifier) = ParseQueryParts(request.Query);
+
+        q.Bool(b =>
         {
-            ss.Query(query => query.Bool(b =>
+            b.Must(must =>
             {
-                b.Must(must =>
+                must.Bool(innerBool =>
                 {
-                    must.Bool(innerBool =>
-                    {
-                        innerBool.Should(
-                            should => should.MultiMatch(mm => mm
-                                .Query(request.Query)
-                                .Fields(new[] { "name^3", "nameEn^2", "alternateNames", "postalCode^4", "parentChain" })
-                                .Fuzziness(new Fuzziness("AUTO"))
-                                .Type(TextQueryType.BestFields)
-                            ),
-                            should => should.Term(t => t
-                                .Field(f => f.PostalCode)
-                                .Value(request.Query.ToUpperInvariant())
-                                .Boost(10)
-                            )
-                        );
-                        innerBool.MinimumShouldMatch(1);
-                    });
+                    innerBool.Should(
+                        should => should.MultiMatch(mm => mm
+                            .Query(nameQuery)
+                            .Fields(new[] { "name^3", "nameEn^2", "alternateNames", "postalCode^4", "parentChain" })
+                            .Fuzziness(new Fuzziness("AUTO"))
+                            .Type(TextQueryType.BestFields)
+                        ),
+                        should => should.Term(t => t
+                            .Field(f => f.PostalCode)
+                            .Value(request.Query.ToUpperInvariant())
+                            .Boost(10)
+                        ),
+                        // Also match postcodes without spaces (e.g., "br66ef" matches "BR6 6EF")
+                        should => should.Term(t => t
+                            .Field(f => f.PostalCode)
+                            .Value(NormalizePostcodeQuery(request.Query))
+                            .Boost(10)
+                        )
+                    );
+                    innerBool.MinimumShouldMatch(1);
                 });
+            });
 
-                var filters = new List<Action<QueryDescriptor<LocationIndexDocument>>>();
+            // Boost exact name matches so they outrank fuzzy/partial matches
+            var shouldClauses = new List<Action<QueryDescriptor<LocationIndexDocument>>>
+            {
+                // Exact keyword match — constant_score guarantees a fixed massive boost
+                s => s.ConstantScore(cs => cs
+                    .Filter(f => f.Term(t => t
+                        .Field(d => d.Name.Suffix("raw"))
+                        .Value(nameQuery.ToLowerInvariant())
+                    ))
+                    .Boost(10000)
+                ),
+                // Also match nameEn exactly
+                s => s.ConstantScore(cs => cs
+                    .Filter(f => f.Match(m => m
+                        .Field(d => d.NameEn)
+                        .Query(nameQuery)
+                        .Operator(Operator.And)
+                    ))
+                    .Boost(5000)
+                ),
+                // All query tokens must match (no fuzz)
+                s => s.Match(m => m
+                    .Field(f => f.Name)
+                    .Query(nameQuery)
+                    .Operator(Operator.And)
+                    .Boost(50)
+                ),
+                s => s.MatchPhrase(mp => mp
+                    .Field(f => f.Name)
+                    .Query(nameQuery)
+                    .Boost(30)
+                )
+            };
 
-                if (!string.IsNullOrEmpty(request.CountryCode))
-                {
-                    filters.Add(f => f.Term(t => t
-                        .Field(d => d.CountryCode)
-                        .Value(request.CountryCode.ToUpperInvariant())
-                    ));
-                }
+            // If a location qualifier is present (e.g., "heathway, chaldon"),
+            // add a strong boost for matching the qualifier in parentChain
+            if (locationQualifier != null)
+            {
+                shouldClauses.Add(s => s.ConstantScore(cs => cs
+                    .Filter(f => f.Match(m => m
+                        .Field(d => d.ParentChain)
+                        .Query(locationQualifier)
+                        .Operator(Operator.And)
+                    ))
+                    .Boost(5000)
+                ));
+            }
+            else if (nameQuery.Contains(' '))
+            {
+                // No comma but multiple words (e.g., "heathway chaldon"):
+                // Boost results where any word appears in parentChain
+                shouldClauses.Add(s => s.Match(m => m
+                    .Field(d => d.ParentChain)
+                    .Query(nameQuery)
+                    .Boost(500)
+                ));
+            }
 
-                if (request.LocationType.HasValue)
-                {
-                    filters.Add(f => f.Term(t => t
-                        .Field(d => d.LocationType)
-                        .Value(request.LocationType.Value.ToString())
-                    ));
-                }
+            b.Should(shouldClauses.ToArray());
 
-                if (filters.Count > 0)
-                    b.Filter(filters.ToArray());
-            }));
+            var filters = new List<Action<QueryDescriptor<LocationIndexDocument>>>();
 
-            ss.Script(script => script
-                .Source("""
-                    double typeBoost = 1.0;
-                    String type = doc['locationType'].value;
-                    if (type == 'Country') typeBoost = 10.0;
-                    else if (type == 'City') typeBoost = 6.0;
-                    else if (type == 'AdminRegion1') typeBoost = 5.0;
-                    else if (type == 'AdminRegion2') typeBoost = 5.0;
-                    else if (type == 'AdminRegion3') typeBoost = 4.0;
-                    else if (type == 'Town') typeBoost = 4.0;
-                    else if (type == 'Village') typeBoost = 3.0;
-                    else if (type == 'Neighborhood') typeBoost = 2.0;
-                    else if (type == 'Road') typeBoost = 0.3;
+            if (!string.IsNullOrEmpty(request.CountryCode))
+            {
+                filters.Add(f => f.Term(t => t
+                    .Field(d => d.CountryCode)
+                    .Value(request.CountryCode.ToUpperInvariant())
+                ));
+            }
 
-                    double popBoost = 1.0;
-                    if (doc['population'].size() > 0 && doc['population'].value > 0) {
-                        popBoost = Math.log10(doc['population'].value) + 1;
-                    }
+            if (request.LocationType.HasValue)
+            {
+                filters.Add(f => f.Term(t => t
+                    .Field(d => d.LocationType)
+                    .Value(request.LocationType.Value.ToString())
+                ));
+            }
 
-                    return _score * typeBoost * popBoost;
-                    """)
-            );
+            if (filters.Count > 0)
+                b.Filter(filters.ToArray());
         });
+    }
+
+    /// <summary>
+    /// Splits a query into (name, locationQualifier).
+    /// "heathway, chaldon" → ("heathway", "chaldon")
+    /// "heathway chaldon" → ("heathway", "chaldon") — when 2+ words and first word looks like a name
+    /// "london" → ("london", null)
+    /// "high beeches" → ("high beeches", null) — common multi-word road name, no qualifier
+    /// </summary>
+    private static (string NameQuery, string? LocationQualifier) ParseQueryParts(string query)
+    {
+        // Explicit comma separator — always split
+        var commaIndex = query.IndexOf(',');
+        if (commaIndex > 0 && commaIndex < query.Length - 1)
+        {
+            var name = query[..commaIndex].Trim();
+            var qualifier = query[(commaIndex + 1)..].Trim();
+            if (name.Length >= 2 && qualifier.Length >= 2)
+                return (name, qualifier);
+        }
+
+        // No comma — return full query as name, but also use full query for parentChain matching
+        // This way "heathway chaldon" searches name for both words AND boosts parentChain matches
+        return (query, null);
+    }
+
+    /// <summary>
+    /// Normalizes a postcode query by stripping spaces and uppercasing,
+    /// then inserts a wildcard space pattern so "br66ef" matches "BR6 6EF".
+    /// </summary>
+    private static string NormalizePostcodeQuery(string query)
+    {
+        var normalized = query.Replace(" ", "").ToUpperInvariant();
+        // Build a pattern like "BR6*6EF" won't work well. Instead use the stripped form with wildcard spaces.
+        // For keyword field matching, we need to insert optional space: "BR6?6EF" or just "*BR6*6EF*"
+        // Simplest: strip spaces from query and create a pattern that matches with optional spaces
+        // E.g., "br66ef" -> "*BR6*6EF*" won't work because keyword is stored with space.
+        // Best approach: insert a wildcard between each character group
+        // Actually simplest: just try inserting a space at common UK postcode positions
+        if (normalized.Length >= 5 && normalized.Length <= 7)
+        {
+            // UK postcodes: incode is always last 3 chars
+            var outcode = normalized[..^3];
+            var incode = normalized[^3..];
+            return $"{outcode} {incode}";
+        }
+        return normalized;
     }
 }
 

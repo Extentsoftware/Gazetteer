@@ -4,5 +4,6 @@ public enum OsmType
 {
     Node,
     Way,
-    Relation
+    Relation,
+    Synthetic
 }
