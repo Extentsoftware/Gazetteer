@@ -1,0 +1,346 @@
+@page "/chat"
+@using Gazetteer.Web.Services
+@using System.Text.Json
+@inject IConfiguration Configuration
+@implements IAsyncDisposable
+@rendermode InteractiveServer
+
+<PageTitle>Location Copilot</PageTitle>
+
+<div class="container-fluid h-100">
+    <div class="row" style="height: calc(100vh - 56px - 40px);">
+        @* Left Panel: Evidence + Suggestions *@
+        <div class="col-lg-3 d-flex flex-column border-end overflow-auto p-3">
+            <h6 class="text-muted mb-2"><i class="bi bi-clipboard-data"></i> Evidence Panel</h6>
+
+            @if (_locationState != null)
+            {
+                <div class="card mb-2">
+                    <div class="card-body p-2">
+                        <div class="d-flex justify-content-between align-items-center mb-2">
+                            <small class="fw-bold">Confidence</small>
+                            <span class="badge @GetConfidenceBadge(_locationState.OverallConfidence)">
+                                @(_locationState.OverallConfidence.ToString("P0"))
+                            </span>
+                        </div>
+                        @if (!string.IsNullOrEmpty(_locationState.PlaceType))
+                        {
+                            <div class="mb-1"><small class="text-muted">Type:</small> <span class="badge bg-secondary">@_locationState.PlaceType</span></div>
+                        }
+                        @if (!string.IsNullOrEmpty(_locationState.CallerStatus))
+                        {
+                            <div class="mb-1"><small class="text-muted">Caller:</small> <span class="badge bg-info">@_locationState.CallerStatus</span></div>
+                        }
+                        @if (!string.IsNullOrEmpty(_locationState.County)) { <div class="mb-1"><small class="text-muted">County:</small> @_locationState.County</div> }
+                        @if (!string.IsNullOrEmpty(_locationState.Town)) { <div class="mb-1"><small class="text-muted">Town:</small> @_locationState.Town</div> }
+                        @if (!string.IsNullOrEmpty(_locationState.Street)) { <div class="mb-1"><small class="text-muted">Street:</small> @_locationState.Street</div> }
+                        @if (!string.IsNullOrEmpty(_locationState.PostcodeFragment)) { <div class="mb-1"><small class="text-muted">Postcode:</small> @_locationState.PostcodeFragment</div> }
+                        @if (!string.IsNullOrEmpty(_locationState.Landmark)) { <div class="mb-1"><small class="text-muted">Landmark:</small> @_locationState.Landmark</div> }
+                    </div>
+                </div>
+
+                @if (_locationState.Clues?.Count > 0)
+                {
+                    <div class="mb-2">
+                        <small class="fw-bold text-success"><i class="bi bi-check-circle"></i> Clues</small>
+                        @foreach (var clue in _locationState.Clues)
+                        {
+                            <div><small class="text-success">• @clue</small></div>
+                        }
+                    </div>
+                }
+
+                @if (_locationState.Contradictions?.Count > 0)
+                {
+                    <div class="mb-2">
+                        <small class="fw-bold text-danger"><i class="bi bi-exclamation-triangle"></i> Contradictions</small>
+                        @foreach (var c in _locationState.Contradictions)
+                        {
+                            <div><small class="text-danger">• @c</small></div>
+                        }
+                    </div>
+                }
+
+                @if (_locationState.RejectedClues?.Count > 0)
+                {
+                    <div class="mb-2">
+                        <small class="fw-bold text-warning"><i class="bi bi-x-circle"></i> Rejected</small>
+                        @foreach (var r in _locationState.RejectedClues)
+                        {
+                            <div><small class="text-muted text-decoration-line-through">• @r</small></div>
+                        }
+                    </div>
+                }
+            }
+            else
+            {
+                <div class="text-muted small">
+                    <p>Start a conversation to extract location clues from the caller's description.</p>
+                    <p>The evidence panel will show accumulated clues, confidence, and contradictions.</p>
+                </div>
+            }
+
+            @* Candidates List *@
+            @if (_candidates.Count > 0)
+            {
+                <h6 class="text-muted mt-3 mb-2"><i class="bi bi-geo-alt"></i> Candidates</h6>
+                @for (int i = 0; i < _candidates.Count; i++)
+                {
+                    var candidate = _candidates[i];
+                    var idx = i + 1;
+                    <div class="card mb-1 candidate-card" @onclick="() => FlyToCandidate(candidate)">
+                        <div class="card-body p-2">
+                            <div class="d-flex justify-content-between">
+                                <strong>@idx. @candidate.Name</strong>
+                                <span class="badge @GetConfidenceBadge(candidate.Confidence)">@candidate.Confidence.ToString("P0")</span>
+                            </div>
+                            <small class="text-muted">@candidate.FullAddress</small>
+                            @if (!string.IsNullOrEmpty(candidate.MatchReason))
+                            {
+                                <div><small class="text-info">@candidate.MatchReason</small></div>
+                            }
+                        </div>
+                    </div>
+                }
+            }
+
+            @* Suggested Questions *@
+            @if (_suggestions.Count > 0)
+            {
+                <h6 class="text-muted mt-3 mb-2"><i class="bi bi-chat-dots"></i> Suggested Questions</h6>
+                @foreach (var q in _suggestions)
+                {
+                    <button class="btn btn-outline-primary btn-sm mb-1 w-100 text-start" @onclick="() => SendSuggestion(q)">
+                        <i class="bi bi-arrow-right"></i> @q
+                    </button>
+                }
+            }
+        </div>
+
+        @* Center Panel: Chat *@
+        <div class="col-lg-5 d-flex flex-column p-0">
+            @* Messages *@
+            <div class="flex-grow-1 overflow-auto p-3" id="chatMessages">
+                @if (_messages.Count == 0)
+                {
+                    <div class="text-center text-muted mt-5">
+                        <h4><i class="bi bi-headset"></i></h4>
+                        <h5>Location Copilot</h5>
+                        <p>Describe what the caller is saying about their location.<br />
+                        The copilot will extract clues, search the gazetteer, and suggest clarifying questions.</p>
+                        <p class="small">Example: <em>"Caller says they're on a road near a pub, somewhere in south London"</em></p>
+                    </div>
+                }
+                @foreach (var msg in _messages)
+                {
+                    <div class="mb-3 @(msg.IsUser ? "text-end" : "")">
+                        <div class="d-inline-block p-2 rounded-3 @(msg.IsUser ? "bg-primary text-white" : "bg-light") "
+                             style="max-width: 85%; text-align: left;">
+                            @((MarkupString)msg.Content.Replace("\n", "<br>"))
+                        </div>
+                        <div class="small text-muted">@msg.Timestamp.ToString("HH:mm:ss")</div>
+                    </div>
+                }
+                @if (_isStreaming)
+                {
+                    <div class="mb-3">
+                        <div class="d-inline-block p-2 rounded-3 bg-light" style="max-width: 85%;">
+                            @((MarkupString)_streamingText.Replace("\n", "<br>"))
+                            <span class="typing-indicator">▊</span>
+                        </div>
+                        @if (!string.IsNullOrEmpty(_progressText))
+                        {
+                            <div class="small text-info"><i class="bi bi-gear-fill spinner-border-sm"></i> @_progressText</div>
+                        }
+                    </div>
+                }
+            </div>
+
+            @* Input *@
+            <div class="border-top p-3">
+                <div class="input-group">
+                    <input type="text" class="form-control" placeholder="Describe the caller's location..."
+                           @bind="_inputText" @bind:event="oninput"
+                           @onkeydown="HandleKeyDown" disabled="@_isStreaming" />
+                    <button class="btn btn-primary" @onclick="SendMessage" disabled="@(_isStreaming || string.IsNullOrWhiteSpace(_inputText))">
+                        <i class="bi bi-send"></i>
+                    </button>
+                    <button class="btn btn-outline-secondary" @onclick="ClearSession" title="New session">
+                        <i class="bi bi-arrow-counterclockwise"></i>
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        @* Right Panel: Map *@
+        <div class="col-lg-4 p-0">
+            <Gazetteer.Web.Components.Map.LeafletMap @ref="_map" Latitude="51.5" Longitude="-0.1" Zoom="6" />
+        </div>
+    </div>
+</div>
+
+@code {
+    private CopilotChatService _chatService = new();
+    private Gazetteer.Web.Components.Map.LeafletMap? _map;
+    private List<ChatMessage> _messages = [];
+    private List<CandidateDto> _candidates = [];
+    private List<string> _suggestions = [];
+    private LocationStateDto? _locationState;
+    private string _inputText = string.Empty;
+    private string _streamingText = string.Empty;
+    private string _progressText = string.Empty;
+    private bool _isStreaming;
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            var apiUrl = Configuration["ApiSettings:BaseUrl"] ?? "http://localhost:50730";
+            _chatService.OnTextReceived += text => InvokeAsync(() => { _streamingText += text; StateHasChanged(); });
+            _chatService.OnProgressReceived += msg => InvokeAsync(() => { _progressText = msg; StateHasChanged(); });
+            _chatService.OnCandidatesReceived += json => InvokeAsync(() => HandleCandidates(json));
+            _chatService.OnEvidenceReceived += json => InvokeAsync(() => HandleEvidence(json));
+            _chatService.OnSuggestionsReceived += json => InvokeAsync(() => HandleSuggestions(json));
+            _chatService.OnMapReceived += json => InvokeAsync(() => HandleMap(json));
+            _chatService.OnStreamComplete += () => InvokeAsync(HandleStreamComplete);
+            _chatService.OnError += err => InvokeAsync(() => { _isStreaming = false; StateHasChanged(); });
+
+            await _chatService.ConnectAsync($"{apiUrl}/chatHub");
+            StateHasChanged();
+        }
+    }
+
+    private async Task SendMessage()
+    {
+        if (string.IsNullOrWhiteSpace(_inputText) || _isStreaming) return;
+
+        var text = _inputText.Trim();
+        _inputText = string.Empty;
+        _messages.Add(new ChatMessage { Content = text, IsUser = true });
+        _isStreaming = true;
+        _streamingText = string.Empty;
+        _progressText = string.Empty;
+        StateHasChanged();
+
+        await _chatService.SendMessageAsync(text);
+    }
+
+    private void HandleStreamComplete()
+    {
+        if (!string.IsNullOrEmpty(_streamingText))
+            _messages.Add(new ChatMessage { Content = _streamingText, IsUser = false });
+        _isStreaming = false;
+        _streamingText = string.Empty;
+        _progressText = string.Empty;
+        StateHasChanged();
+    }
+
+    private void HandleCandidates(string json)
+    {
+        _candidates = JsonSerializer.Deserialize<List<CandidateDto>>(json,
+            new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? [];
+        StateHasChanged();
+    }
+
+    private void HandleEvidence(string json)
+    {
+        _locationState = JsonSerializer.Deserialize<LocationStateDto>(json,
+            new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+        StateHasChanged();
+    }
+
+    private void HandleSuggestions(string json)
+    {
+        _suggestions = JsonSerializer.Deserialize<List<string>>(json,
+            new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? [];
+        StateHasChanged();
+    }
+
+    private async void HandleMap(string json)
+    {
+        var markers = JsonSerializer.Deserialize<List<CandidateDto>>(json,
+            new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? [];
+        if (_map != null && markers.Count > 0)
+        {
+            // Show first candidate as primary marker
+            var first = markers[0];
+            await _map.SetMarkerAsync(first.Latitude, first.Longitude, $"1. {first.Name}");
+        }
+        StateHasChanged();
+    }
+
+    private async Task FlyToCandidate(CandidateDto candidate)
+    {
+        if (_map != null)
+            await _map.FlyToAsync(candidate.Latitude, candidate.Longitude, 15);
+    }
+
+    private async Task SendSuggestion(string question)
+    {
+        _inputText = $"Caller response to '{question}': ";
+        StateHasChanged();
+    }
+
+    private async Task ClearSession()
+    {
+        await _chatService.ClearSessionAsync();
+        _messages.Clear();
+        _candidates.Clear();
+        _suggestions.Clear();
+        _locationState = null;
+        _streamingText = string.Empty;
+        StateHasChanged();
+    }
+
+    private void HandleKeyDown(KeyboardEventArgs e)
+    {
+        if (e.Key == "Enter" && !_isStreaming)
+            _ = SendMessage();
+    }
+
+    private static string GetConfidenceBadge(double confidence) => confidence switch
+    {
+        >= 0.7 => "bg-success",
+        >= 0.4 => "bg-warning",
+        _ => "bg-danger"
+    };
+
+    public async ValueTask DisposeAsync() => await _chatService.DisposeAsync();
+
+    private class ChatMessage
+    {
+        public string Content { get; set; } = string.Empty;
+        public bool IsUser { get; set; }
+        public DateTime Timestamp { get; set; } = DateTime.Now;
+    }
+
+    private class CandidateDto
+    {
+        public long Id { get; set; }
+        public string Name { get; set; } = string.Empty;
+        public string LocationType { get; set; } = string.Empty;
+        public string FullAddress { get; set; } = string.Empty;
+        public double Latitude { get; set; }
+        public double Longitude { get; set; }
+        public double Confidence { get; set; }
+        public string MatchReason { get; set; } = string.Empty;
+        public List<string> SupportingClues { get; set; } = [];
+    }
+
+    private class LocationStateDto
+    {
+        public string? County { get; set; }
+        public string? Town { get; set; }
+        public string? Street { get; set; }
+        public string? PostcodeFragment { get; set; }
+        public string? Landmark { get; set; }
+        public string? PlaceType { get; set; }
+        public string? CallerStatus { get; set; }
+        public string? DirectionOfTravel { get; set; }
+        public List<string>? Clues { get; set; }
+        public List<string>? RejectedClues { get; set; }
+        public List<string>? Contradictions { get; set; }
+        public string? NextBestQuestion { get; set; }
+        public double OverallConfidence { get; set; }
+    }
+}

@@ -2,7 +2,8 @@
   "permissions": {
     "allow": [
       "mcp__Desktop_Commander__read_multiple_files",
-      "mcp__Desktop_Commander__list_directory"
+      "mcp__Desktop_Commander__list_directory",
+      "mcp__Desktop_Commander__read_file"
     ]
   }
 }
