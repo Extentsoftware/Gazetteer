@@ -82,10 +82,20 @@ public class BulkImporter
 
     private async Task InsertBatchAsync(List<Location> batch, CancellationToken ct)
     {
-        using var scope = _serviceProvider.CreateScope();
-        var db = scope.ServiceProvider.GetRequiredService<GazetteerDbContext>();
+        // Split into smaller sub-batches to avoid EF Core OOM in CommandBatchPreparer.
+        // Locations with geometry + self-referencing FK create large in-memory graphs.
+        const int subBatchSize = 500;
 
-        db.Locations.AddRange(batch);
-        await db.SaveChangesAsync(ct);
+        for (int i = 0; i < batch.Count; i += subBatchSize)
+        {
+            var subBatch = batch.GetRange(i, Math.Min(subBatchSize, batch.Count - i));
+
+            using var scope = _serviceProvider.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<GazetteerDbContext>();
+            db.ChangeTracker.AutoDetectChangesEnabled = false;
+
+            db.Locations.AddRange(subBatch);
+            await db.SaveChangesAsync(ct);
+        }
     }
 }
