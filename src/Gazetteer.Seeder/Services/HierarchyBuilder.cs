@@ -92,47 +92,79 @@ public class HierarchyBuilder
     /// <summary>
     /// For each non-admin orphan location, find the smallest containing admin region.
     /// Uses the location's lat/lon point against admin region polygon geometries.
+    /// Processes in batches to avoid loading millions of entities into a single DbContext.
     /// </summary>
     private async Task AssignOrphansToAdminRegionsAsync(
         GazetteerDbContext db, List<Core.Models.Location> adminRegions,
         string countryCode, CancellationToken ct)
     {
-        var orphans = await db.Locations
+        // Count orphans without loading them
+        var totalOrphans = await db.Locations
             .Where(l => l.CountryCode == countryCode && l.ParentId == null && l.LocationType != LocationType.Country)
             .Where(l => l.LocationType != LocationType.AdminRegion1 &&
                         l.LocationType != LocationType.AdminRegion2 &&
                         l.LocationType != LocationType.AdminRegion3)
-            .ToListAsync(ct);
+            .CountAsync(ct);
 
-        _logger.LogInformation("Assigning parents to {Count} orphan locations in {Country}", orphans.Count, countryCode);
+        _logger.LogInformation("Assigning parents to {Count:N0} orphan locations in {Country}", totalOrphans, countryCode);
 
         var preparedRegions = PrepareGeometries(adminRegions);
-        int assigned = 0;
-        foreach (var location in orphans)
+        int totalAssigned = 0;
+        int totalProcessed = 0;
+        const int batchSize = 25_000;
+        long lastId = 0;
+
+        while (totalProcessed < totalOrphans)
         {
-            if (location.Latitude == 0 && location.Longitude == 0) continue;
+            // Use a fresh scope per batch to keep change tracker small
+            using var batchScope = _serviceProvider.CreateScope();
+            var batchDb = batchScope.ServiceProvider.GetRequiredService<GazetteerDbContext>();
+            batchDb.ChangeTracker.AutoDetectChangesEnabled = false;
 
-            var point = new Point(location.Longitude, location.Latitude) { SRID = 4326 };
+            // Keyset pagination: fetch next batch of orphans ordered by Id
+            var batch = await batchDb.Locations
+                .Where(l => l.CountryCode == countryCode && l.ParentId == null && l.LocationType != LocationType.Country)
+                .Where(l => l.LocationType != LocationType.AdminRegion1 &&
+                            l.LocationType != LocationType.AdminRegion2 &&
+                            l.LocationType != LocationType.AdminRegion3)
+                .Where(l => l.Id > lastId)
+                .OrderBy(l => l.Id)
+                .Take(batchSize)
+                .ToListAsync(ct);
 
-            // Find the smallest admin region containing this point
-            var parent = adminRegions
-                .Where(r => r.LocationType < location.LocationType && r.Geometry != null)
-                .OrderByDescending(r => r.LocationType)
-                .FirstOrDefault(r => SafeContains(preparedRegions, r.Id, point));
+            if (batch.Count == 0) break;
+            lastId = batch[^1].Id;
 
-            if (parent != null)
+            int batchAssigned = 0;
+            foreach (var location in batch)
             {
-                location.ParentId = parent.Id;
-                assigned++;
+                if (location.Latitude == 0 && location.Longitude == 0) continue;
+
+                var point = new Point(location.Longitude, location.Latitude) { SRID = 4326 };
+
+                var parent = adminRegions
+                    .Where(r => r.LocationType < location.LocationType && r.Geometry != null)
+                    .OrderByDescending(r => r.LocationType)
+                    .FirstOrDefault(r => SafeContains(preparedRegions, r.Id, point));
+
+                if (parent != null)
+                {
+                    location.ParentId = parent.Id;
+                    batchAssigned++;
+                }
             }
 
-            if (assigned % 1000 == 0 && assigned > 0)
-                _logger.LogInformation("Assigned {Count} parents so far", assigned);
+            batchDb.ChangeTracker.DetectChanges();
+            await batchDb.SaveChangesAsync(ct);
+
+            totalAssigned += batchAssigned;
+            totalProcessed += batch.Count;
+            _logger.LogInformation("Hierarchy progress: {Processed:N0}/{Total:N0} processed, {Assigned:N0} assigned",
+                totalProcessed, totalOrphans, totalAssigned);
         }
 
-        await db.SaveChangesAsync(ct);
-        _logger.LogInformation("Hierarchy complete for {Country}: {Assigned} of {Total} locations assigned parents",
-            countryCode, assigned, orphans.Count);
+        _logger.LogInformation("Hierarchy complete for {Country}: {Assigned:N0} of {Total:N0} locations assigned parents",
+            countryCode, totalAssigned, totalOrphans);
     }
 
     private async Task BuildProximityHierarchyAsync(GazetteerDbContext db, string countryCode, CancellationToken ct)
