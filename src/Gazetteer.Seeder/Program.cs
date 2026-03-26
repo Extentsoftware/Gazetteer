@@ -75,16 +75,17 @@ async Task RunSeeder(IServiceProvider services, SeederOptions options, ILogger l
         else
         {
             pbfFilePath = Path.Combine(options.DataDirectory, $"{countryCode.ToLowerInvariant()}-latest.osm.pbf");
-            if (!File.Exists(pbfFilePath))
-            {
-                logger.LogWarning("PBF file not found: {Path}. Run with --steps download first.", pbfFilePath);
-                continue;
-            }
         }
 
         // Step 2 & 3: Parse and Load
         if (steps.Contains("parse") || steps.Contains("load"))
         {
+            if (pbfFilePath == null || !File.Exists(pbfFilePath))
+            {
+                logger.LogWarning("PBF file not found: {Path}. Run with --steps download first.", pbfFilePath);
+                continue;
+            }
+
             // Clear existing data for this country to avoid duplicates on re-run
             await importer.ClearLocationsForCountryAsync(countryCode);
 

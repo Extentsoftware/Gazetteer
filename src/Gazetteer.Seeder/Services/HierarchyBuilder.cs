@@ -53,6 +53,10 @@ public class HierarchyBuilder
 
         // Then: assign all other orphan locations to their containing admin region
         await AssignOrphansToAdminRegionsAsync(db, adminRegions, countryCode, ct);
+
+        // Finally: assign roads/amenities to nearest sub-locality (neighborhood/village/town)
+        // so the hierarchy shows e.g. Spur Road → Goddington → London Borough of Bromley
+        await AssignToNearestSubLocalityAsync(countryCode, ct);
     }
 
     /// <summary>
@@ -165,6 +169,116 @@ public class HierarchyBuilder
 
         _logger.LogInformation("Hierarchy complete for {Country}: {Assigned:N0} of {Total:N0} locations assigned parents",
             countryCode, totalAssigned, totalOrphans);
+    }
+
+    /// <summary>
+    /// For roads and amenities already assigned to an admin region, find the nearest
+    /// neighborhood/village/town/city within the same admin region and re-parent through it.
+    /// E.g.: Road → AdminRegion3 becomes Road → Neighborhood → AdminRegion3
+    /// </summary>
+    private async Task AssignToNearestSubLocalityAsync(string countryCode, CancellationToken ct)
+    {
+        _logger.LogInformation("Assigning sub-locality parents for roads/amenities in {Country}", countryCode);
+
+        // Load all sub-localities (neighborhoods, villages, towns, cities) that have parents
+        using var lookupScope = _serviceProvider.CreateScope();
+        var lookupDb = lookupScope.ServiceProvider.GetRequiredService<GazetteerDbContext>();
+
+        var subLocalities = await lookupDb.Locations
+            .AsNoTracking()
+            .Where(l => l.CountryCode == countryCode && l.ParentId != null)
+            .Where(l => l.LocationType == LocationType.Neighborhood ||
+                        l.LocationType == LocationType.Village ||
+                        l.LocationType == LocationType.Town ||
+                        l.LocationType == LocationType.City ||
+                        l.LocationType == LocationType.Locality)
+            .Select(l => new { l.Id, l.ParentId, l.Latitude, l.Longitude, l.LocationType })
+            .ToListAsync(ct);
+
+        if (subLocalities.Count == 0)
+        {
+            _logger.LogInformation("No sub-localities found for {Country}, skipping", countryCode);
+            return;
+        }
+
+        // Group sub-localities by their admin parent for fast lookup
+        var subLocalitiesByParent = subLocalities
+            .Where(s => s.ParentId.HasValue)
+            .GroupBy(s => s.ParentId!.Value)
+            .ToDictionary(g => g.Key, g => g.ToList());
+
+        _logger.LogInformation("Found {Count:N0} sub-localities across {Parents:N0} admin regions",
+            subLocalities.Count, subLocalitiesByParent.Count);
+
+        // Process roads/amenities in batches
+        const int batchSize = 25_000;
+        long lastId = 0;
+        int totalAssigned = 0;
+        int totalProcessed = 0;
+
+        while (true)
+        {
+            using var batchScope = _serviceProvider.CreateScope();
+            var batchDb = batchScope.ServiceProvider.GetRequiredService<GazetteerDbContext>();
+            batchDb.ChangeTracker.AutoDetectChangesEnabled = false;
+
+            var batch = await batchDb.Locations
+                .Where(l => l.CountryCode == countryCode && l.ParentId != null)
+                .Where(l => l.LocationType == LocationType.Road || l.LocationType == LocationType.Amenity)
+                .Where(l => l.Id > lastId)
+                .OrderBy(l => l.Id)
+                .Take(batchSize)
+                .ToListAsync(ct);
+
+            if (batch.Count == 0) break;
+            lastId = batch[^1].Id;
+
+            int batchAssigned = 0;
+            foreach (var location in batch)
+            {
+                if (location.Latitude == 0 && location.Longitude == 0) continue;
+                if (!location.ParentId.HasValue) continue;
+
+                // Find sub-localities under the same admin parent
+                if (!subLocalitiesByParent.TryGetValue(location.ParentId.Value, out var candidates))
+                    continue;
+
+                // Find nearest sub-locality by distance
+                double bestDist = double.MaxValue;
+                long? bestId = null;
+
+                foreach (var candidate in candidates)
+                {
+                    if (candidate.Latitude == 0 && candidate.Longitude == 0) continue;
+                    var dist = Distance(location.Latitude, location.Longitude, candidate.Latitude, candidate.Longitude);
+                    if (dist < bestDist)
+                    {
+                        bestDist = dist;
+                        bestId = candidate.Id;
+                    }
+                }
+
+                // Only assign if within ~5km (0.05 degrees squared ≈ 5km at mid-latitudes)
+                if (bestId.HasValue && bestDist < 0.0025)
+                {
+                    location.ParentId = bestId.Value;
+                    batchAssigned++;
+                }
+            }
+
+            batchDb.ChangeTracker.DetectChanges();
+            await batchDb.SaveChangesAsync(ct);
+
+            totalAssigned += batchAssigned;
+            totalProcessed += batch.Count;
+
+            if (totalProcessed % 100_000 == 0 || batch.Count < batchSize)
+                _logger.LogInformation("Sub-locality assignment: {Processed:N0} processed, {Assigned:N0} assigned",
+                    totalProcessed, totalAssigned);
+        }
+
+        _logger.LogInformation("Sub-locality assignment complete for {Country}: {Assigned:N0} of {Total:N0} roads/amenities assigned",
+            countryCode, totalAssigned, totalProcessed);
     }
 
     private async Task BuildProximityHierarchyAsync(GazetteerDbContext db, string countryCode, CancellationToken ct)

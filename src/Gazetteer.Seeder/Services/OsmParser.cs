@@ -630,7 +630,7 @@ public class OsmParser
             pbfFilePath, nodeCount, extractedCount, newPostcodes.Count);
     }
 
-    private static Location MergeRoadSegments(List<Location> segments)
+    private Location MergeRoadSegments(List<Location> segments)
     {
         var first = segments[0];
         if (segments.Count == 1) return first;
@@ -641,6 +641,16 @@ public class OsmParser
         {
             first.Latitude = withCoords.Average(s => s.Latitude);
             first.Longitude = withCoords.Average(s => s.Longitude);
+        }
+
+        // Merge geometries into a MultiLineString
+        var lineStrings = segments
+            .Where(s => s.Geometry is LineString)
+            .Select(s => (LineString)s.Geometry!)
+            .ToArray();
+        if (lineStrings.Length > 0)
+        {
+            first.Geometry = _geometryFactory.CreateMultiLineString(lineStrings);
         }
 
         // Merge unique postal codes
@@ -819,6 +829,18 @@ public class OsmParser
                         catch
                         {
                             // Invalid polygon — skip geometry, keep centroid
+                        }
+                    }
+                    // Build LineString for open ways (roads, paths)
+                    else if (wayCoords.Length >= 2)
+                    {
+                        try
+                        {
+                            geometry = _geometryFactory.CreateLineString(wayCoords);
+                        }
+                        catch
+                        {
+                            // Invalid linestring — skip geometry, keep centroid
                         }
                     }
                 }

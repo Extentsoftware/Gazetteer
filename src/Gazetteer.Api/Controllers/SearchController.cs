@@ -21,6 +21,7 @@ public class SearchController : ControllerBase
         [FromQuery] string q,
         [FromQuery] string? country = null,
         [FromQuery] LocationType? type = null,
+        [FromQuery] long? within = null,
         [FromQuery] int limit = 20,
         CancellationToken ct = default)
     {
@@ -35,6 +36,7 @@ public class SearchController : ControllerBase
             Query = q,
             CountryCode = country,
             LocationType = type,
+            WithinOsmId = within,
             Limit = limit
         };
 

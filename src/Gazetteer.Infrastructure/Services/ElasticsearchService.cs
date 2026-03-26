@@ -309,6 +309,14 @@ public class ElasticsearchService : IElasticsearchService
                             .Fuzziness(new Fuzziness("AUTO"))
                             .Type(TextQueryType.BestFields)
                         ),
+                        // Cross-field match: allows "spur road london" to match
+                        // "spur road" in name + "london" in parentChain
+                        should => should.MultiMatch(mm => mm
+                            .Query(nameQuery)
+                            .Fields(new[] { "name^2", "parentChain" })
+                            .Type(TextQueryType.CrossFields)
+                            .Operator(Operator.And)
+                        ),
                         should => should.Term(t => t
                             .Field(f => f.PostalCode)
                             .Value(request.Query.ToUpperInvariant())
@@ -400,6 +408,18 @@ public class ElasticsearchService : IElasticsearchService
                 filters.Add(f => f.Term(t => t
                     .Field(d => d.LocationType)
                     .Value(request.LocationType.Value.ToString())
+                ));
+            }
+
+            // "Search within" — only return locations that have the specified parent in their chain
+            if (request.WithinOsmId.HasValue)
+            {
+                filters.Add(f => f.Nested(n => n
+                    .Path("parents")
+                    .Query(nq => nq.Term(t => t
+                        .Field("parents.osmId")
+                        .Value(request.WithinOsmId.Value)
+                    ))
                 ));
             }
 
