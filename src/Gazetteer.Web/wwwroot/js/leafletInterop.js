@@ -4,6 +4,11 @@ window.leafletInterop = {
     geoJsonLayer: null,
 
     initialize: function (elementId, lat, lon, zoom) {
+        if (typeof L === 'undefined') {
+            console.error('Leaflet library not loaded - check CDN availability');
+            return;
+        }
+
         if (this.map) {
             this.map.remove();
         }

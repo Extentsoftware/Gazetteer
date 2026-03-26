@@ -13,8 +13,16 @@
     {
         if (firstRender)
         {
-            await JS.InvokeVoidAsync("leafletInterop.initialize", "gazetteer-map", Latitude, Longitude, Zoom);
-            _initialized = true;
+            try
+            {
+                await JS.InvokeVoidAsync("leafletInterop.initialize", "gazetteer-map", Latitude, Longitude, Zoom);
+                _initialized = true;
+            }
+            catch (Exception ex)
+            {
+                // Don't let map init failure kill the Blazor circuit
+                System.Diagnostics.Debug.WriteLine($"Map init failed: {ex.Message}");
+            }
         }
     }
 

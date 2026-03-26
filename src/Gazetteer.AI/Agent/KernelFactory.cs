@@ -21,6 +21,10 @@ public class KernelFactory(
             return Task.FromResult(_kernel.Clone());
         }
 
+        if (string.IsNullOrWhiteSpace(config.ApiKey))
+            throw new InvalidOperationException(
+                "OpenAI API key is not configured. Set the OpenAI__ApiKey environment variable.");
+
         logger.LogInformation("Creating new kernel with deployment {Deployment} at {Endpoint}",
             config.DeploymentName, config.Endpoint);
 
