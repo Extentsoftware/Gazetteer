@@ -21,14 +21,15 @@ public class KernelFactory(
             return Task.FromResult(_kernel.Clone());
         }
 
-        logger.LogInformation("Creating new kernel with model {Model}", config.ModelId);
+        logger.LogInformation("Creating new kernel with deployment {Deployment} at {Endpoint}",
+            config.DeploymentName, config.Endpoint);
 
         var builder = Kernel.CreateBuilder();
         builder.Services.AddLogging(l => l.SetMinimumLevel(LogLevel.Information));
-        builder.Services.AddOpenAIChatCompletion(
-            modelId: config.ModelId,
+        builder.Services.AddAzureOpenAIChatCompletion(
+            deploymentName: config.DeploymentName,
+            endpoint: config.Endpoint,
             apiKey: config.ApiKey,
-            orgId: config.OrgId,
             serviceId: "openai");
 
         // Register tool invocation filter
