@@ -83,7 +83,10 @@ public class ElasticsearchService : IElasticsearchService
                     .FloatNumber(d => d.Latitude)
                     .FloatNumber(d => d.Longitude)
                     .LongNumber(d => d.Population)
-                    .Text(d => d.ParentChain)
+                    .Text(d => d.ParentChain, t => t
+                        .Analyzer("gazetteer_analyzer")
+                        .SearchAnalyzer("gazetteer_search_analyzer")
+                    )
                     .Text(d => d.SearchableAddress, t => t
                         .Analyzer("gazetteer_analyzer")
                         .SearchAnalyzer("gazetteer_search_analyzer")
@@ -311,15 +314,16 @@ public class ElasticsearchService : IElasticsearchService
                         // Primary: cross-field search across name + parents + searchableAddress
                         should => should.MultiMatch(mm => mm
                             .Query(query)
-                            .Fields(new[] { "name^5", "parentChain^3", "searchableAddress^1" })
+                            .Fields(new[] { "name^5", "parentChain^2", "searchableAddress^3" })
                             .Type(TextQueryType.CrossFields)
                             .Operator(Operator.And)
                         ),
                         // Fallback: fuzzy best-fields on name for typo tolerance
                         should => should.MultiMatch(mm => mm
                             .Query(query)
-                            .Fields(new[] { "name^3", "nameEn^2", "alternateNames" })
+                            .Fields(new[] { "name^2", "nameEn^1", "alternateNames" })
                             .Fuzziness(new Fuzziness("AUTO"))
+                            .PrefixLength(2)
                             .Type(TextQueryType.BestFields)
                         ),
                         // Postcode exact match
