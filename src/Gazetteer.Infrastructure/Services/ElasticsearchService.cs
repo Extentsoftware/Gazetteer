@@ -84,6 +84,10 @@ public class ElasticsearchService : IElasticsearchService
                     .FloatNumber(d => d.Longitude)
                     .LongNumber(d => d.Population)
                     .Text(d => d.ParentChain)
+                    .Text(d => d.SearchableAddress, t => t
+                        .Analyzer("gazetteer_analyzer")
+                        .SearchAnalyzer("gazetteer_search_analyzer")
+                    )
                     .Nested(d => d.Parents, n => n
                         .Properties(pp => pp
                             .LongNumber("osmId")
@@ -293,33 +297,37 @@ public class ElasticsearchService : IElasticsearchService
 
     private static void BuildQuery(QueryDescriptor<LocationIndexDocument> q, GazetteerSearchRequest request)
     {
-        // Parse comma-separated query: "heathway, chaldon" → name="heathway", qualifier="chaldon"
-        var (nameQuery, locationQualifier) = ParseQueryParts(request.Query);
+        var query = request.Query.Replace(",", " ").Trim();
 
         q.Bool(b =>
         {
+            // Must: cross_fields across name (high boost), parentChain (medium), searchableAddress (low)
+            // All query terms must appear across the combined fields
             b.Must(must =>
             {
                 must.Bool(innerBool =>
                 {
                     innerBool.Should(
+                        // Primary: cross-field search across name + parents + searchableAddress
                         should => should.MultiMatch(mm => mm
-                            .Query(nameQuery)
-                            .Fields(new[] { "name^3", "nameEn^2", "alternateNames", "postalCode^4" })
+                            .Query(query)
+                            .Fields(new[] { "name^5", "parentChain^3", "searchableAddress^1" })
+                            .Type(TextQueryType.CrossFields)
+                            .Operator(Operator.And)
+                        ),
+                        // Fallback: fuzzy best-fields on name for typo tolerance
+                        should => should.MultiMatch(mm => mm
+                            .Query(query)
+                            .Fields(new[] { "name^3", "nameEn^2", "alternateNames" })
                             .Fuzziness(new Fuzziness("AUTO"))
                             .Type(TextQueryType.BestFields)
                         ),
-                        // Also match against parentChain so searching "london" finds London
-                        should => should.Match(mm => mm
-                            .Query(nameQuery)
-                            .Field(d => d.ParentChain)
-                        ),
+                        // Postcode exact match
                         should => should.Term(t => t
                             .Field(f => f.PostalCode)
                             .Value(request.Query.ToUpperInvariant())
                             .Boost(10)
                         ),
-                        // Also match postcodes without spaces (e.g., "br66ef" matches "BR6 6EF")
                         should => should.Term(t => t
                             .Field(f => f.PostalCode)
                             .Value(NormalizePostcodeQuery(request.Query))
@@ -330,67 +338,30 @@ public class ElasticsearchService : IElasticsearchService
                 });
             });
 
-            // Boost exact name matches so they outrank fuzzy/partial matches
-            var shouldClauses = new List<Action<QueryDescriptor<LocationIndexDocument>>>
-            {
-                // Exact keyword match — constant_score guarantees a fixed massive boost
+            // Should: boost exact name matches
+            b.Should(
+                // Exact keyword match on name
                 s => s.ConstantScore(cs => cs
                     .Filter(f => f.Term(t => t
                         .Field(d => d.Name.Suffix("raw"))
-                        .Value(nameQuery.ToLowerInvariant())
+                        .Value(query.ToLowerInvariant())
                     ))
                     .Boost(10000)
                 ),
-                // Also match nameEn exactly
-                s => s.ConstantScore(cs => cs
-                    .Filter(f => f.Match(m => m
-                        .Field(d => d.NameEn)
-                        .Query(nameQuery)
-                        .Operator(Operator.And)
-                    ))
-                    .Boost(5000)
-                ),
-                // All query tokens must match (no fuzz)
+                // All query tokens in name (no fuzz)
                 s => s.Match(m => m
                     .Field(f => f.Name)
-                    .Query(nameQuery)
+                    .Query(query)
                     .Operator(Operator.And)
                     .Boost(50)
                 ),
+                // Phrase match on name
                 s => s.MatchPhrase(mp => mp
                     .Field(f => f.Name)
-                    .Query(nameQuery)
+                    .Query(query)
                     .Boost(30)
                 )
-            };
-
-            // If a location qualifier is present (e.g., "heathway, chaldon"),
-            // add a strong boost for matching the qualifier in parentChain
-            if (locationQualifier != null)
-            {
-                shouldClauses.Add(s => s.ConstantScore(cs => cs
-                    .Filter(f => f.Match(m => m
-                        .Field(d => d.ParentChain)
-                        .Query(locationQualifier)
-                        .Operator(Operator.And)
-                    ))
-                    .Boost(5000)
-                ));
-            }
-            else if (nameQuery.Split(' ').Length >= 3)
-            {
-                // No comma but 3+ words without a detected qualifier.
-                // Boost results where any word appears in parentChain.
-                // Skip for 2-word queries like "spur road" — those are typically
-                // just the full location name, not name + context.
-                shouldClauses.Add(s => s.Match(m => m
-                    .Field(d => d.ParentChain)
-                    .Query(nameQuery)
-                    .Boost(500)
-                ));
-            }
-
-            b.Should(shouldClauses.ToArray());
+            );
 
             var filters = new List<Action<QueryDescriptor<LocationIndexDocument>>>();
 
@@ -410,7 +381,6 @@ public class ElasticsearchService : IElasticsearchService
                 ));
             }
 
-            // "Search within" — only return locations that have the specified parent in their chain
             if (request.WithinOsmId.HasValue)
             {
                 var withinOsmId = request.WithinOsmId.Value;
@@ -426,52 +396,6 @@ public class ElasticsearchService : IElasticsearchService
             if (filters.Count > 0)
                 b.Filter(filters.ToArray());
         });
-    }
-
-    /// <summary>
-    /// Splits a query into (name, locationQualifier).
-    /// "heathway, chaldon" → ("heathway", "chaldon")
-    /// "heathway chaldon" → ("heathway", "chaldon") — when 2+ words and first word looks like a name
-    /// "london" → ("london", null)
-    /// "high beeches" → ("high beeches", null) — common multi-word road name, no qualifier
-    /// </summary>
-    private static readonly HashSet<string> RoadSuffixes = new(StringComparer.OrdinalIgnoreCase)
-    {
-        "road", "street", "lane", "avenue", "drive", "close", "way", "place", "court",
-        "crescent", "terrace", "gardens", "grove", "hill", "park", "rise", "row",
-        "square", "walk", "mews", "yard", "alley", "passage", "path", "trail",
-        "rue", "straße", "strasse", "weg", "platz", "gasse", "calle", "via",
-        "north", "south", "east", "west" // directional suffixes for roads
-    };
-
-    private static (string NameQuery, string? LocationQualifier) ParseQueryParts(string query)
-    {
-        // Explicit comma separator — always split
-        var commaIndex = query.IndexOf(',');
-        if (commaIndex > 0 && commaIndex < query.Length - 1)
-        {
-            var name = query[..commaIndex].Trim();
-            var qualifier = query[(commaIndex + 1)..].Trim();
-            if (name.Length >= 2 && qualifier.Length >= 2)
-                return (name, qualifier);
-        }
-
-        // No comma — try to detect implicit qualifier.
-        // "spur road london" → name="spur road", qualifier="london"
-        // "high beeches" → name="high beeches", qualifier=null (road suffix)
-        var words = query.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-        if (words.Length >= 3)
-        {
-            // If the last word is NOT a road suffix, treat it as a location qualifier
-            var lastWord = words[^1];
-            if (!RoadSuffixes.Contains(lastWord))
-            {
-                var name = string.Join(' ', words[..^1]);
-                return (name, lastWord);
-            }
-        }
-
-        return (query, null);
     }
 
     /// <summary>

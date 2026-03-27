@@ -2,6 +2,7 @@
 @using Gazetteer.Web.Services
 @using System.Text.Json
 @inject IConfiguration Configuration
+@inject IJSRuntime JS
 @implements IAsyncDisposable
 
 <PageTitle>Location Copilot</PageTitle>
@@ -195,7 +196,7 @@
         if (firstRender)
         {
             var apiUrl = Configuration["ApiSettings:BaseUrl"] ?? "http://localhost:50730";
-            _chatService.OnTextReceived += text => InvokeAsync(() => { _streamingText += text; StateHasChanged(); });
+            _chatService.OnTextReceived += text => InvokeAsync(async () => { _streamingText += text; StateHasChanged(); await ScrollChat(); });
             _chatService.OnProgressReceived += msg => InvokeAsync(() => { _progressText = msg; StateHasChanged(); });
             _chatService.OnCandidatesReceived += json => InvokeAsync(() => HandleCandidates(json));
             _chatService.OnEvidenceReceived += json => InvokeAsync(() => HandleEvidence(json));
@@ -220,11 +221,12 @@
         _streamingText = string.Empty;
         _progressText = string.Empty;
         StateHasChanged();
+        await ScrollChat();
 
         await _chatService.SendMessageAsync(text);
     }
 
-    private void HandleStreamComplete()
+    private async void HandleStreamComplete()
     {
         if (!string.IsNullOrEmpty(_streamingText))
             _messages.Add(new ChatMessage { Content = _streamingText, IsUser = false });
@@ -232,6 +234,12 @@
         _streamingText = string.Empty;
         _progressText = string.Empty;
         StateHasChanged();
+        await ScrollChat();
+    }
+
+    private async Task ScrollChat()
+    {
+        try { await JS.InvokeVoidAsync("chatInterop.scrollToBottom", "chatMessages"); } catch { }
     }
 
     private void HandleCandidates(string json)

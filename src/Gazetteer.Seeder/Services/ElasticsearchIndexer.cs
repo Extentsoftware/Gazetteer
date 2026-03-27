@@ -38,6 +38,16 @@ public class ElasticsearchIndexer
         _logger = logger;
     }
 
+    // Locality types used for building searchable address (nearby place names)
+    private static readonly HashSet<LocationType> LocalityTypes =
+    [
+        LocationType.Neighborhood,
+        LocationType.Village,
+        LocationType.Town,
+        LocationType.City,
+        LocationType.Locality
+    ];
+
     public async Task IndexAllAsync(int batchSize, bool recreateIndex, CancellationToken ct = default)
     {
         using var scope = _serviceProvider.CreateScope();
@@ -63,7 +73,24 @@ public class ElasticsearchIndexer
 
         _logger.LogInformation("Parent lookup loaded: {Count:N0} entries", parentLookup.Count);
 
-        await IndexLocationsAsync(esService, db, parentLookup, batchSize, ct);
+        // Pre-load localities grouped by admin parent for searchableAddress
+        _logger.LogInformation("Loading locality lookup for searchable address...");
+        var localityLookup = await db.Locations
+            .AsNoTracking()
+            .Where(l => LocalityTypes.Contains(l.LocationType) && l.ParentId != null)
+            .Select(l => new { l.Name, l.ParentId, l.Latitude, l.Longitude })
+            .ToListAsync(ct);
+
+        // Group by admin parent → list of (name, lat, lon)
+        var localitiesByParent = localityLookup
+            .Where(l => l.ParentId.HasValue)
+            .GroupBy(l => l.ParentId!.Value)
+            .ToDictionary(g => g.Key, g => g.Select(l => (l.Name, l.Latitude, l.Longitude)).ToList());
+
+        _logger.LogInformation("Locality lookup loaded: {Count:N0} localities across {Parents:N0} admin regions",
+            localityLookup.Count, localitiesByParent.Count);
+
+        await IndexLocationsAsync(esService, db, parentLookup, localitiesByParent, batchSize, ct);
         await IndexBoundariesAsync(esService, db, parentLookup, batchSize, ct);
 
         _logger.LogInformation("Elasticsearch indexing complete");
@@ -101,9 +128,48 @@ public class ElasticsearchIndexer
         return string.Join(" > ", parents.Select(p => p.Name));
     }
 
+    /// <summary>
+    /// Build a searchable address string: name + parent names + nearby locality names.
+    /// E.g. "Buckingham Way Woodcote Green Wallington Carshalton London Borough of Sutton Greater London England United Kingdom"
+    /// </summary>
+    private string BuildSearchableAddress(
+        string name, List<ParentInfo> parents, double lat, double lon,
+        long? parentId, Dictionary<long, List<(string Name, double Latitude, double Longitude)>> localitiesByParent)
+    {
+        var parts = new List<string> { name };
+
+        // Add all parent names
+        foreach (var p in parents)
+            parts.Add(p.Name);
+
+        // Add nearby locality names from the same admin parent (within ~5km)
+        if (parentId.HasValue)
+        {
+            // Walk up to find the admin parent (AdminRegion3 level)
+            var adminParentId = parentId.Value;
+
+            if (localitiesByParent.TryGetValue(adminParentId, out var localities))
+            {
+                foreach (var loc in localities)
+                {
+                    if (loc.Latitude == 0 && loc.Longitude == 0) continue;
+                    var dlat = lat - loc.Latitude;
+                    var dlon = lon - loc.Longitude;
+                    var distSq = dlat * dlat + dlon * dlon;
+                    // ~5km at mid-latitudes ≈ 0.0025 squared degrees
+                    if (distSq < 0.0025 && !parts.Contains(loc.Name))
+                        parts.Add(loc.Name);
+                }
+            }
+        }
+
+        return string.Join(" ", parts);
+    }
+
     private async Task IndexLocationsAsync(
         IElasticsearchService esService, GazetteerDbContext db,
         Dictionary<long, ParentLookupEntry> parentLookup,
+        Dictionary<long, List<(string Name, double Latitude, double Longitude)>> localitiesByParent,
         int batchSize, CancellationToken ct)
     {
         var totalCount = await db.Locations.CountAsync(ct);
@@ -157,6 +223,9 @@ public class ElasticsearchIndexer
                     Population = l.Population,
                     HasGeometry = l.HasGeometry,
                     ParentChain = BuildParentChain(parents),
+                    SearchableAddress = BuildSearchableAddress(
+                        l.Name, parents, l.Latitude, l.Longitude,
+                        l.ParentId, localitiesByParent),
                     Parents = parents
                 };
             }).ToList();
