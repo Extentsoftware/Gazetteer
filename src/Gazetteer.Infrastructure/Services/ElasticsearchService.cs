@@ -304,27 +304,31 @@ public class ElasticsearchService : IElasticsearchService
 
         q.Bool(b =>
         {
-            // Must: cross_fields across name (high boost), parentChain (medium), searchableAddress (low)
-            // All query terms must appear across the combined fields
+            // Must: match query in name OR across all fields
             b.Must(must =>
             {
                 must.Bool(innerBool =>
                 {
                     innerBool.Should(
-                        // Primary: cross-field search across name + parents + searchableAddress
+                        // Primary: match in name (most terms should be in name)
+                        should => should.Match(m => m
+                            .Field(f => f.Name)
+                            .Query(query)
+                            .Boost(5)
+                        ),
+                        // Cross-field: terms can span name + context
                         should => should.MultiMatch(mm => mm
                             .Query(query)
-                            .Fields(new[] { "name^5", "parentChain^2", "searchableAddress^3" })
+                            .Fields(new[] { "name^10", "parentChain^2", "searchableAddress^2" })
                             .Type(TextQueryType.CrossFields)
                             .Operator(Operator.And)
                         ),
-                        // Fallback: fuzzy best-fields on name for typo tolerance
-                        should => should.MultiMatch(mm => mm
+                        // Fuzzy name match for typos
+                        should => should.Match(m => m
+                            .Field(f => f.Name)
                             .Query(query)
-                            .Fields(new[] { "name^2", "nameEn^1", "alternateNames" })
                             .Fuzziness(new Fuzziness("AUTO"))
                             .PrefixLength(2)
-                            .Type(TextQueryType.BestFields)
                         ),
                         // Postcode exact match
                         should => should.Term(t => t
@@ -342,9 +346,9 @@ public class ElasticsearchService : IElasticsearchService
                 });
             });
 
-            // Should: boost exact name matches
+            // Should: boost signals for ranking
             b.Should(
-                // Exact keyword match on name
+                // Exact keyword match on name — highest boost
                 s => s.ConstantScore(cs => cs
                     .Filter(f => f.Term(t => t
                         .Field(d => d.Name.Suffix("raw"))
@@ -352,18 +356,27 @@ public class ElasticsearchService : IElasticsearchService
                     ))
                     .Boost(10000)
                 ),
-                // All query tokens in name (no fuzz)
+                // All query tokens in name — very strong signal
                 s => s.Match(m => m
                     .Field(f => f.Name)
                     .Query(query)
                     .Operator(Operator.And)
-                    .Boost(50)
+                    .Boost(200)
                 ),
                 // Phrase match on name
                 s => s.MatchPhrase(mp => mp
                     .Field(f => f.Name)
                     .Query(query)
-                    .Boost(30)
+                    .Boost(100)
+                ),
+                // Context: query terms in parentChain/searchableAddress disambiguate
+                // "wallington" in context boosts Buckingham Way near Wallington over others
+                s => s.MultiMatch(mm => mm
+                    .Query(query)
+                    .Fields(new[] { "parentChain^3", "searchableAddress^3" })
+                    .Type(TextQueryType.MostFields)
+                    .Operator(Operator.Or)
+                    .Boost(10)
                 )
             );
 

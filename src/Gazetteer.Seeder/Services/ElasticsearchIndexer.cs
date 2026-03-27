@@ -81,11 +81,23 @@ public class ElasticsearchIndexer
             .Select(l => new { l.Name, l.ParentId, l.Latitude, l.Longitude })
             .ToListAsync(ct);
 
+        // Also load single-word amenities (stations, etc. often named after areas)
+        // e.g. "Wallington" station, "Orpington" station — these are area names people use
+        var areaAmenities = await db.Locations
+            .AsNoTracking()
+            .Where(l => l.LocationType == LocationType.Amenity && l.ParentId != null)
+            .Where(l => !l.Name.Contains(' '))
+            .Select(l => new { l.Name, l.ParentId, l.Latitude, l.Longitude })
+            .ToListAsync(ct);
+
+        _logger.LogInformation("Loaded {Amenities:N0} single-word amenities as area names", areaAmenities.Count);
+        localityLookup.AddRange(areaAmenities);
+
         // Group by admin parent → list of (name, lat, lon)
         var localitiesByParent = localityLookup
             .Where(l => l.ParentId.HasValue)
             .GroupBy(l => l.ParentId!.Value)
-            .ToDictionary(g => g.Key, g => g.Select(l => (l.Name, l.Latitude, l.Longitude)).ToList());
+            .ToDictionary(g => g.Key, g => g.Select(l => (l.Name, l.Latitude, l.Longitude)).Distinct().ToList());
 
         _logger.LogInformation("Locality lookup loaded: {Count:N0} localities across {Parents:N0} admin regions",
             localityLookup.Count, localitiesByParent.Count);
