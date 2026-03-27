@@ -86,7 +86,7 @@ public class ElasticsearchIndexer
         var areaAmenities = await db.Locations
             .AsNoTracking()
             .Where(l => l.LocationType == LocationType.Amenity && l.ParentId != null)
-            .Where(l => !l.Name.Contains(' '))
+            .Where(l => !EF.Functions.Like(l.Name, "% %"))
             .Select(l => new { l.Name, l.ParentId, l.Latitude, l.Longitude })
             .ToListAsync(ct);
 
