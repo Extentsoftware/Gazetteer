@@ -7,4 +7,5 @@ public class SeederOptions
     public string DataDirectory { get; set; } = "./data";
     public int BatchSize { get; set; } = 5000;
     public bool RecreateIndex { get; set; }
+    public string? OnspdFile { get; set; }
 }
