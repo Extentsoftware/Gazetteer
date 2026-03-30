@@ -24,6 +24,7 @@ builder.Services.AddTransient<BulkImporter>();
 builder.Services.AddTransient<ElasticsearchIndexer>();
 builder.Services.AddTransient<HierarchyBuilder>();
 builder.Services.AddTransient<PostcodeSynthesizer>();
+builder.Services.AddHttpClient<OnspdImporter>();
 builder.Services.AddTransient<OnspdImporter>();
 
 var host = builder.Build();
@@ -108,10 +109,19 @@ async Task RunSeeder(IServiceProvider services, SeederOptions options, ILogger l
     }
 
     // Step 5: Import ONSPD postcodes (UK only, after hierarchy so admin regions exist)
-    if (steps.Contains("postcodes") && !string.IsNullOrEmpty(options.OnspdFile))
+    if (steps.Contains("postcodes") && countryCodes.Contains("GB"))
     {
         var onspdImporter = services.GetRequiredService<OnspdImporter>();
-        await onspdImporter.ImportAsync(options.OnspdFile, options.BatchSize);
+        var onspdFile = options.OnspdFile;
+
+        // Auto-download ONSPD if no file path configured
+        if (string.IsNullOrEmpty(onspdFile))
+        {
+            logger.LogInformation("No ONSPD file configured, downloading automatically...");
+            onspdFile = await onspdImporter.DownloadAsync(options.OnspdUrl, options.DataDirectory);
+        }
+
+        await onspdImporter.ImportAsync(onspdFile, options.BatchSize);
     }
 
     // Step 6: Index to Elasticsearch (after all countries and postcodes are loaded)

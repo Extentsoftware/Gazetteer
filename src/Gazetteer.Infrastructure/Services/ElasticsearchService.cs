@@ -80,6 +80,7 @@ public class ElasticsearchService : IElasticsearchService
                     .Keyword(d => d.LocationType)
                     .Keyword(d => d.CountryCode)
                     .Keyword(d => d.PostalCode)
+                    .Keyword(d => d.NearbyPostcodes)
                     .FloatNumber(d => d.Latitude)
                     .FloatNumber(d => d.Longitude)
                     .LongNumber(d => d.Population)
@@ -87,7 +88,11 @@ public class ElasticsearchService : IElasticsearchService
                         .Analyzer("gazetteer_analyzer")
                         .SearchAnalyzer("gazetteer_search_analyzer")
                     )
-                    .Text(d => d.SearchableAddress, t => t
+                    .Text(d => d.LocalitiesClose, t => t
+                        .Analyzer("gazetteer_analyzer")
+                        .SearchAnalyzer("gazetteer_search_analyzer")
+                    )
+                    .Text(d => d.LocalitiesNear, t => t
                         .Analyzer("gazetteer_analyzer")
                         .SearchAnalyzer("gazetteer_search_analyzer")
                     )
@@ -319,7 +324,7 @@ public class ElasticsearchService : IElasticsearchService
                         // Cross-field: terms can span name + context
                         should => should.MultiMatch(mm => mm
                             .Query(query)
-                            .Fields(new[] { "name^10", "parentChain^2", "searchableAddress^2" })
+                            .Fields(new[] { "name^10", "parentChain^2", "localitiesClose^2", "localitiesNear^1" })
                             .Type(TextQueryType.CrossFields)
                             .Operator(Operator.And)
                         ),
@@ -330,7 +335,7 @@ public class ElasticsearchService : IElasticsearchService
                             .Fuzziness(new Fuzziness("AUTO"))
                             .PrefixLength(2)
                         ),
-                        // Postcode exact match
+                        // Postcode exact match (own postcode)
                         should => should.Term(t => t
                             .Field(f => f.PostalCode)
                             .Value(request.Query.ToUpperInvariant())
@@ -340,6 +345,17 @@ public class ElasticsearchService : IElasticsearchService
                             .Field(f => f.PostalCode)
                             .Value(NormalizePostcodeQuery(request.Query))
                             .Boost(10)
+                        ),
+                        // Nearby postcode match (roads near a postcode)
+                        should => should.Term(t => t
+                            .Field(f => f.NearbyPostcodes)
+                            .Value(request.Query.ToUpperInvariant())
+                            .Boost(5)
+                        ),
+                        should => should.Term(t => t
+                            .Field(f => f.NearbyPostcodes)
+                            .Value(NormalizePostcodeQuery(request.Query))
+                            .Boost(5)
                         )
                     );
                     innerBool.MinimumShouldMatch(1);
@@ -369,14 +385,24 @@ public class ElasticsearchService : IElasticsearchService
                     .Query(query)
                     .Boost(100)
                 ),
-                // Context: query terms in parentChain/searchableAddress disambiguate
+                // Context: query terms in parentChain/localities disambiguate
                 // "wallington" in context boosts Buckingham Way near Wallington over others
                 s => s.MultiMatch(mm => mm
                     .Query(query)
-                    .Fields(new[] { "parentChain^3", "searchableAddress^3" })
+                    .Fields(new[] { "parentChain^3", "localitiesClose^3", "localitiesNear^1" })
                     .Type(TextQueryType.MostFields)
                     .Operator(Operator.Or)
                     .Boost(10)
+                ),
+                // Cross-field all-terms boost — strong disambiguation signal
+                // When ALL query tokens are accounted for across name + context, boost heavily
+                // e.g. "buckingham way wallington" → "buckingham way" in name + "wallington" in localitiesClose
+                s => s.MultiMatch(mm => mm
+                    .Query(query)
+                    .Fields(new[] { "name^5", "parentChain^2", "localitiesClose^2", "localitiesNear^1" })
+                    .Type(TextQueryType.CrossFields)
+                    .Operator(Operator.And)
+                    .Boost(50)
                 )
             );
 

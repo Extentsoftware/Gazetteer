@@ -40,7 +40,9 @@ public class LocationIndexDocument
     public double Longitude { get; set; }
     public long? Population { get; set; }
     public string? ParentChain { get; set; }
-    public string? SearchableAddress { get; set; }
+    public string? LocalitiesClose { get; set; }
+    public string? LocalitiesNear { get; set; }
+    public List<string> NearbyPostcodes { get; set; } = [];
     public List<ParentInfo> Parents { get; set; } = [];
     public bool HasGeometry { get; set; }
 }

@@ -73,7 +73,7 @@ public class ElasticsearchIndexer
 
         _logger.LogInformation("Parent lookup loaded: {Count:N0} entries", parentLookup.Count);
 
-        // Pre-load localities grouped by admin parent for searchableAddress
+        // Pre-load localities grouped by admin parent for locality fields
         _logger.LogInformation("Loading locality lookup for searchable address...");
         var localityLookup = await db.Locations
             .AsNoTracking()
@@ -102,7 +102,23 @@ public class ElasticsearchIndexer
         _logger.LogInformation("Locality lookup loaded: {Count:N0} localities across {Parents:N0} admin regions",
             localityLookup.Count, localitiesByParent.Count);
 
-        await IndexLocationsAsync(esService, db, parentLookup, localitiesByParent, batchSize, ct);
+        // Pre-load postcodes grouped by admin parent for nearby postcode lookup
+        _logger.LogInformation("Loading postcode lookup for nearby postcodes...");
+        var postcodeLookup = await db.Locations
+            .AsNoTracking()
+            .Where(l => l.LocationType == LocationType.Postcode && l.ParentId != null && l.PostalCode != null)
+            .Select(l => new { l.PostalCode, l.ParentId, l.Latitude, l.Longitude })
+            .ToListAsync(ct);
+
+        var postcodesByParent = postcodeLookup
+            .Where(l => l.ParentId.HasValue)
+            .GroupBy(l => l.ParentId!.Value)
+            .ToDictionary(g => g.Key, g => g.Select(l => (l.PostalCode!, l.Latitude, l.Longitude)).ToList());
+
+        _logger.LogInformation("Postcode lookup loaded: {Count:N0} postcodes across {Parents:N0} admin regions",
+            postcodeLookup.Count, postcodesByParent.Count);
+
+        await IndexLocationsAsync(esService, db, parentLookup, localitiesByParent, postcodesByParent, batchSize, ct);
         await IndexBoundariesAsync(esService, db, parentLookup, batchSize, ct);
 
         _logger.LogInformation("Elasticsearch indexing complete");
@@ -141,26 +157,30 @@ public class ElasticsearchIndexer
     }
 
     /// <summary>
-    /// Build a searchable address string: name + parent names + nearby locality names.
-    /// E.g. "Buckingham Way Woodcote Green Wallington Carshalton London Borough of Sutton Greater London England United Kingdom"
+    /// Build distance-banded locality fields for search disambiguation.
+    /// Close (~0-1.5km) localities get higher search boost than near (~1.5-5km) ones.
     /// </summary>
-    private string BuildSearchableAddress(
-        string name, List<ParentInfo> parents, double lat, double lon,
-        long? parentId, Dictionary<long, List<(string Name, double Latitude, double Longitude)>> localitiesByParent)
+    private static (string? Close, string? Near) BuildLocalityFields(
+        double lat, double lon, long? parentId,
+        Dictionary<long, ParentLookupEntry> parentLookup,
+        Dictionary<long, List<(string Name, double Latitude, double Longitude)>> localitiesByParent)
     {
-        var parts = new List<string> { name };
+        var closeParts = new List<string>();
+        var nearParts = new List<string>();
 
-        // Add all parent names
-        foreach (var p in parents)
-            parts.Add(p.Name);
-
-        // Add nearby locality names from the same admin parent (within ~5km)
+        // Walk up the parent chain to find the admin region that localities are grouped by
         if (parentId.HasValue)
         {
-            // Walk up to find the admin parent (AdminRegion3 level)
-            var adminParentId = parentId.Value;
+            long? adminParentId = parentId.Value;
+            while (adminParentId.HasValue && !localitiesByParent.ContainsKey(adminParentId.Value))
+            {
+                if (parentLookup.TryGetValue(adminParentId.Value, out var entry))
+                    adminParentId = entry.ParentId;
+                else
+                    break;
+            }
 
-            if (localitiesByParent.TryGetValue(adminParentId, out var localities))
+            if (adminParentId.HasValue && localitiesByParent.TryGetValue(adminParentId.Value, out var localities))
             {
                 foreach (var loc in localities)
                 {
@@ -168,20 +188,77 @@ public class ElasticsearchIndexer
                     var dlat = lat - loc.Latitude;
                     var dlon = lon - loc.Longitude;
                     var distSq = dlat * dlat + dlon * dlon;
-                    // ~5km at mid-latitudes ≈ 0.0025 squared degrees
-                    if (distSq < 0.0025 && !parts.Contains(loc.Name))
-                        parts.Add(loc.Name);
+
+                    // ~1.5km at mid-latitudes ≈ 0.00020 squared degrees
+                    if (distSq < 0.00020)
+                    {
+                        if (!closeParts.Contains(loc.Name))
+                            closeParts.Add(loc.Name);
+                    }
+                    // ~1.5-5km
+                    else if (distSq < 0.0025)
+                    {
+                        if (!nearParts.Contains(loc.Name))
+                            nearParts.Add(loc.Name);
+                    }
                 }
             }
         }
 
-        return string.Join(" ", parts);
+        return (
+            closeParts.Count > 0 ? string.Join(" ", closeParts) : null,
+            nearParts.Count > 0 ? string.Join(" ", nearParts) : null
+        );
+    }
+
+    /// <summary>
+    /// Find postcodes within ~300m of a location for display and search.
+    /// </summary>
+    private static List<string> FindNearbyPostcodes(
+        double lat, double lon, long? parentId,
+        Dictionary<long, ParentLookupEntry> parentLookup,
+        Dictionary<long, List<(string Postcode, double Latitude, double Longitude)>> postcodesByParent)
+    {
+        var result = new List<string>();
+
+        if (!parentId.HasValue) return result;
+
+        // Walk up to admin parent (same pattern as BuildLocalityFields)
+        long? adminParentId = parentId.Value;
+        while (adminParentId.HasValue && !postcodesByParent.ContainsKey(adminParentId.Value))
+        {
+            if (parentLookup.TryGetValue(adminParentId.Value, out var entry))
+                adminParentId = entry.ParentId;
+            else
+                break;
+        }
+
+        if (!adminParentId.HasValue || !postcodesByParent.TryGetValue(adminParentId.Value, out var postcodes))
+            return result;
+
+        foreach (var pc in postcodes)
+        {
+            if (pc.Latitude == 0 && pc.Longitude == 0) continue;
+            var dlat = lat - pc.Latitude;
+            var dlon = lon - pc.Longitude;
+            var distSq = dlat * dlat + dlon * dlon;
+
+            // ~300m at mid-latitudes ≈ 0.000010 squared degrees
+            if (distSq < 0.000010 && !result.Contains(pc.Postcode))
+            {
+                result.Add(pc.Postcode);
+                if (result.Count >= 20) break; // cap to avoid bloating docs
+            }
+        }
+
+        return result;
     }
 
     private async Task IndexLocationsAsync(
         IElasticsearchService esService, GazetteerDbContext db,
         Dictionary<long, ParentLookupEntry> parentLookup,
         Dictionary<long, List<(string Name, double Latitude, double Longitude)>> localitiesByParent,
+        Dictionary<long, List<(string Postcode, double Latitude, double Longitude)>> postcodesByParent,
         int batchSize, CancellationToken ct)
     {
         var totalCount = await db.Locations.CountAsync(ct);
@@ -219,6 +296,8 @@ public class ElasticsearchIndexer
             var documents = locations.Select(l =>
             {
                 var parents = BuildParentsList(l.ParentId, parentLookup);
+                var (close, near) = BuildLocalityFields(
+                    l.Latitude, l.Longitude, l.ParentId, parentLookup, localitiesByParent);
                 return new LocationIndexDocument
                 {
                     Id = l.Id,
@@ -235,9 +314,10 @@ public class ElasticsearchIndexer
                     Population = l.Population,
                     HasGeometry = l.HasGeometry,
                     ParentChain = BuildParentChain(parents),
-                    SearchableAddress = BuildSearchableAddress(
-                        l.Name, parents, l.Latitude, l.Longitude,
-                        l.ParentId, localitiesByParent),
+                    LocalitiesClose = close,
+                    LocalitiesNear = near,
+                    NearbyPostcodes = FindNearbyPostcodes(
+                        l.Latitude, l.Longitude, l.ParentId, parentLookup, postcodesByParent),
                     Parents = parents
                 };
             }).ToList();

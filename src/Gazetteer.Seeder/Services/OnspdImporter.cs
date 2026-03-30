@@ -17,12 +17,63 @@ namespace Gazetteer.Seeder.Services;
 public class OnspdImporter
 {
     private readonly IServiceProvider _serviceProvider;
+    private readonly HttpClient _httpClient;
     private readonly ILogger<OnspdImporter> _logger;
 
-    public OnspdImporter(IServiceProvider serviceProvider, ILogger<OnspdImporter> logger)
+    public OnspdImporter(IServiceProvider serviceProvider, HttpClient httpClient, ILogger<OnspdImporter> logger)
     {
         _serviceProvider = serviceProvider;
+        _httpClient = httpClient;
         _logger = logger;
+    }
+
+    /// <summary>
+    /// Downloads the ONSPD zip file if it doesn't already exist locally.
+    /// </summary>
+    public async Task<string> DownloadAsync(string url, string dataDir, CancellationToken ct = default)
+    {
+        var filePath = Path.Combine(dataDir, "onspd.zip");
+
+        if (File.Exists(filePath))
+        {
+            _logger.LogInformation("ONSPD file already exists: {FilePath}, skipping download", filePath);
+            return filePath;
+        }
+
+        Directory.CreateDirectory(dataDir);
+        _logger.LogInformation("Downloading ONSPD from {Url}...", url);
+
+        using var response = await _httpClient.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct);
+        response.EnsureSuccessStatusCode();
+
+        var totalBytes = response.Content.Headers.ContentLength ?? 0;
+        await using var contentStream = await response.Content.ReadAsStreamAsync(ct);
+        await using var fileStream = new FileStream(filePath, FileMode.Create, FileAccess.Write, FileShare.None, 8192, true);
+
+        var buffer = new byte[81920];
+        long totalRead = 0;
+        int bytesRead;
+        var lastProgress = 0;
+
+        while ((bytesRead = await contentStream.ReadAsync(buffer, ct)) > 0)
+        {
+            await fileStream.WriteAsync(buffer.AsMemory(0, bytesRead), ct);
+            totalRead += bytesRead;
+
+            if (totalBytes > 0)
+            {
+                var progress = (int)(totalRead * 100 / totalBytes);
+                if (progress >= lastProgress + 10)
+                {
+                    lastProgress = progress;
+                    _logger.LogInformation("  ONSPD: {Progress}% ({Read:N0} / {Total:N0} bytes)",
+                        progress, totalRead, totalBytes);
+                }
+            }
+        }
+
+        _logger.LogInformation("Downloaded ONSPD: {Size:N0} bytes to {Path}", totalRead, filePath);
+        return filePath;
     }
 
     public async Task ImportAsync(string zipFilePath, int batchSize, CancellationToken ct = default)

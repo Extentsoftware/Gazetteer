@@ -570,7 +570,12 @@ public class OsmParser
 
         foreach (var (_, group) in placeGroups)
         {
-            yield return PickBestPlace(group);
+            // Cluster by proximity so same-name places in different locations survive
+            // (e.g. "Wallington" in Sutton vs "Wallington" in Hertfordshire)
+            foreach (var cluster in ClusterByProximity(group, maxDistanceKm: 10.0))
+            {
+                yield return PickBestPlace(cluster);
+            }
         }
 
         // Merge road segments with the same name into single entries

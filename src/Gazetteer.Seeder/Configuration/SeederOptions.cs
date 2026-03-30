@@ -8,4 +8,5 @@ public class SeederOptions
     public int BatchSize { get; set; } = 5000;
     public bool RecreateIndex { get; set; }
     public string? OnspdFile { get; set; }
+    public string OnspdUrl { get; set; } = "https://www.arcgis.com/sharing/rest/content/items/3080229224424c9cb53c0b48f5a64d27/data";
 }
