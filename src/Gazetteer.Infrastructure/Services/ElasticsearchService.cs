@@ -124,12 +124,12 @@ public class ElasticsearchService : IElasticsearchService
     {
         var response = await _client.IndexAsync(document, idx => idx
             .Index(IndexName)
-            .Id(document.OsmId.ToString()),
+            .Id(document.Id.ToString()),
             ct
         );
 
         if (!response.IsValidResponse)
-            _logger.LogWarning("Failed to index document {OsmId}: {Error}", document.OsmId, response.DebugInformation);
+            _logger.LogWarning("Failed to index document {Id}: {Error}", document.Id, response.DebugInformation);
     }
 
     public async Task BulkIndexAsync(IEnumerable<LocationIndexDocument> documents, CancellationToken ct = default)
@@ -139,7 +139,7 @@ public class ElasticsearchService : IElasticsearchService
 
         var response = await _client.BulkAsync(b => b
             .Index(IndexName)
-            .IndexMany(batch, (op, doc) => op.Id(doc.OsmId.ToString())),
+            .IndexMany(batch, (op, doc) => op.Id(doc.Id.ToString())),
             ct
         );
 

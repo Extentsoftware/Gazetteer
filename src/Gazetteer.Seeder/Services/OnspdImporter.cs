@@ -155,11 +155,15 @@ public class OnspdImporter
                 if (fields.Length <= Math.Max(Math.Max(pcdsIdx, latIdx), lonIdx))
                     continue;
 
-                // Skip terminated postcodes
-                if (dotermIdx >= 0 && dotermIdx < fields.Length && !string.IsNullOrWhiteSpace(fields[dotermIdx]))
+                // Skip terminated postcodes (doterm field is quoted in ONSPD CSV, e.g. "199606" or "")
+                if (dotermIdx >= 0 && dotermIdx < fields.Length)
                 {
-                    totalSkipped++;
-                    continue;
+                    var doterm = fields[dotermIdx].Trim().Trim('"');
+                    if (!string.IsNullOrWhiteSpace(doterm))
+                    {
+                        totalSkipped++;
+                        continue;
+                    }
                 }
 
                 var postcode = fields[pcdsIdx].Trim().Trim('"');
