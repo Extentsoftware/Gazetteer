@@ -1,0 +1,54 @@
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f5f5f5; color: #333; }
+
+.layout { display: flex; flex-direction: column; height: 100vh; }
+.header { background: #1a56db; color: white; padding: 0.75rem 1.5rem; }
+.header h1 { font-size: 1.25rem; font-weight: 600; }
+.main-content { flex: 1; display: flex; overflow: hidden; }
+
+.gazetteer-container { display: flex; width: 100%; height: 100%; }
+.search-panel { width: 420px; display: flex; flex-direction: column; background: white; border-right: 1px solid #ddd; overflow-y: auto; }
+.map-panel { flex: 1; position: relative; display: flex; flex-direction: column; }
+
+.search-box { padding: 1rem; border-bottom: 1px solid #eee; }
+.search-box input { width: 100%; padding: 0.75rem; border: 2px solid #ddd; border-radius: 8px; font-size: 1rem; outline: none; transition: border-color 0.2s; }
+.search-box input:focus { border-color: #1a56db; }
+
+.filter-panel { display: flex; gap: 0.5rem; padding: 0.75rem 1rem; border-bottom: 1px solid #eee; background: #fafafa; }
+.filter-panel select { flex: 1; padding: 0.5rem; border: 1px solid #ddd; border-radius: 6px; font-size: 0.875rem; background: white; }
+
+.loading { padding: 2rem; text-align: center; color: #666; }
+.no-results { padding: 2rem; text-align: center; color: #999; }
+
+.search-results { flex: 1; overflow-y: auto; }
+.result-item { padding: 0.75rem 1rem; border-bottom: 1px solid #eee; cursor: pointer; transition: background 0.15s; }
+.result-item:hover { background: #f0f4ff; }
+.result-item.selected { background: #e8f0fe; border-left: 3px solid #1a56db; }
+.result-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.25rem; }
+.result-name { font-weight: 600; font-size: 0.95rem; }
+.result-type { font-size: 0.7rem; padding: 0.15rem 0.5rem; border-radius: 10px; background: #e5e7eb; color: #555; text-transform: uppercase; font-weight: 600; }
+.result-postcode { font-size: 0.85rem; color: #1a56db; font-weight: 500; }
+.result-parents { font-size: 0.8rem; color: #777; margin-top: 0.15rem; }
+.result-meta { display: flex; gap: 0.5rem; align-items: center; margin-top: 0.25rem; font-size: 0.75rem; color: #999; }
+.has-geometry { color: #1a56db; font-size: 0.9rem; }
+
+.badge-city, .badge-town { background: #dbeafe; color: #1e40af; }
+.badge-adminregion1, .badge-adminregion2, .badge-adminregion3 { background: #fef3c7; color: #92400e; }
+.badge-postcode { background: #d1fae5; color: #065f46; }
+.badge-road { background: #ede9fe; color: #5b21b6; }
+.badge-village { background: #fce7f3; color: #9d174d; }
+.badge-country { background: #fee2e2; color: #991b1b; }
+
+.location-detail { background: white; border-bottom: 1px solid #ddd; max-height: 45%; overflow-y: auto; padding: 1rem; }
+.detail-header { display: flex; justify-content: space-between; align-items: center; }
+.detail-header h2 { font-size: 1.1rem; }
+.close-btn { background: none; border: none; font-size: 1.2rem; cursor: pointer; color: #666; padding: 0.25rem 0.5rem; }
+.close-btn:hover { color: #333; }
+.detail-type { display: inline-block; margin: 0.5rem 0; font-size: 0.7rem; padding: 0.15rem 0.5rem; border-radius: 10px; background: #e5e7eb; color: #555; text-transform: uppercase; font-weight: 600; }
+.detail-breadcrumb { font-size: 0.85rem; color: #666; margin: 0.5rem 0; }
+.breadcrumb-sep { color: #ccc; }
+.breadcrumb-current { font-weight: 600; color: #333; }
+.detail-info { margin-top: 0.75rem; font-size: 0.875rem; line-height: 1.75; }
+.detail-info strong { color: #555; }
+
+.leaflet-map { flex: 1; min-height: 300px; z-index: 0; }

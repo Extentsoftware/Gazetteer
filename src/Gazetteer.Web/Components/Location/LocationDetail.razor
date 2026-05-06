@@ -1,0 +1,55 @@
+@using Gazetteer.Core.DTOs
+
+<div class="location-detail">
+    <div class="detail-header">
+        <h2>@Detail.Name</h2>
+        <button class="close-btn" @onclick="OnClose">X</button>
+    </div>
+
+    <div class="detail-type badge-@Detail.LocationType.ToString().ToLower()">
+        @Detail.LocationType
+    </div>
+
+    @if (Detail.ParentChain.Count > 0)
+    {
+        <div class="detail-breadcrumb">
+            @foreach (var parent in Detail.ParentChain)
+            {
+                <span class="breadcrumb-item">@parent.Name (@parent.LocationType)</span>
+                <span class="breadcrumb-sep"> > </span>
+            }
+            <span class="breadcrumb-current">@Detail.Name</span>
+        </div>
+    }
+
+    <div class="detail-info">
+        @if (!string.IsNullOrEmpty(Detail.NameEn) && Detail.NameEn != Detail.Name)
+        {
+            <div><strong>English name:</strong> @Detail.NameEn</div>
+        }
+        @if (!string.IsNullOrEmpty(Detail.LocalName) && Detail.LocalName != Detail.Name)
+        {
+            <div><strong>Local name:</strong> @Detail.LocalName</div>
+        }
+        @if (Detail.AlternateNames.Count > 0)
+        {
+            <div><strong>Alternate names:</strong> @string.Join(", ", Detail.AlternateNames)</div>
+        }
+        @if (!string.IsNullOrEmpty(Detail.PostalCode))
+        {
+            <div><strong>Postal code:</strong> @Detail.PostalCode</div>
+        }
+        @if (Detail.Population.HasValue)
+        {
+            <div><strong>Population:</strong> @Detail.Population.Value.ToString("N0")</div>
+        }
+        <div><strong>Coordinates:</strong> @Detail.Lat.ToString("F5"), @Detail.Lon.ToString("F5")</div>
+        <div><strong>Country:</strong> @Detail.CountryCode</div>
+        <div><strong>OSM:</strong> @Detail.OsmType/@Detail.OsmId</div>
+    </div>
+</div>
+
+@code {
+    [Parameter, EditorRequired] public LocationDetailDto Detail { get; set; } = default!;
+    [Parameter] public EventCallback OnClose { get; set; }
+}

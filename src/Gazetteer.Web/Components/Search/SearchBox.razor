@@ -1,0 +1,36 @@
+@using System.Timers
+
+<div class="search-box">
+    <input type="text"
+           placeholder="Search postcodes, towns, roads, districts..."
+           @bind="_query"
+           @bind:event="oninput"
+           @bind:after="OnInputChanged" />
+</div>
+
+@code {
+    [Parameter] public EventCallback<string> OnSearch { get; set; }
+
+    private string _query = string.Empty;
+    private Timer? _debounceTimer;
+
+    private void OnInputChanged()
+    {
+        _debounceTimer?.Stop();
+        _debounceTimer?.Dispose();
+        _debounceTimer = new Timer(300);
+        _debounceTimer.Elapsed += async (_, _) =>
+        {
+            _debounceTimer?.Stop();
+            await InvokeAsync(async () => await OnSearch.InvokeAsync(_query));
+        };
+        _debounceTimer.AutoReset = false;
+        _debounceTimer.Start();
+    }
+
+    public void Dispose()
+    {
+        _debounceTimer?.Stop();
+        _debounceTimer?.Dispose();
+    }
+}

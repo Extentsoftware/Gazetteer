@@ -1,0 +1,39 @@
+@using Gazetteer.Core.DTOs
+
+<div class="search-results">
+    @foreach (var result in Results)
+    {
+        <div class="result-item @(SelectedId == result.Id ? "selected" : "")"
+             @onclick="() => OnResultSelected.InvokeAsync(result)">
+            <div class="result-header">
+                <span class="result-name">@result.Name</span>
+                <span class="result-type badge-@result.LocationType.ToString().ToLower()">
+                    @result.LocationType
+                </span>
+            </div>
+            @if (!string.IsNullOrEmpty(result.PostalCode))
+            {
+                <div class="result-postcode">@result.PostalCode</div>
+            }
+            @if (result.ParentChain.Count > 0)
+            {
+                <div class="result-parents">
+                    @string.Join(" > ", result.ParentChain.Select(p => p.Name))
+                </div>
+            }
+            <div class="result-meta">
+                <span class="result-country">@result.CountryCode</span>
+                @if (result.HasGeometry)
+                {
+                    <span class="has-geometry" title="Boundary available">&#x25A1;</span>
+                }
+            </div>
+        </div>
+    }
+</div>
+
+@code {
+    [Parameter] public List<SearchResultDto> Results { get; set; } = [];
+    [Parameter] public EventCallback<SearchResultDto> OnResultSelected { get; set; }
+    [Parameter] public int? SelectedId { get; set; }
+}

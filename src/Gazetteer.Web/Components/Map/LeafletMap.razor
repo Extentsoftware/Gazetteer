@@ -1,0 +1,40 @@
+@inject IJSRuntime JS
+
+<div id="map" class="leaflet-map"></div>
+
+@code {
+    private bool _initialized;
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            await JS.InvokeVoidAsync("leafletInterop.initialize", "map", 50.0, 10.0, 4);
+            _initialized = true;
+        }
+    }
+
+    public async Task SetMarker(double lat, double lon, string popup)
+    {
+        if (_initialized)
+            await JS.InvokeVoidAsync("leafletInterop.setMarker", lat, lon, popup);
+    }
+
+    public async Task ShowGeoJson(object geoJson)
+    {
+        if (_initialized)
+            await JS.InvokeVoidAsync("leafletInterop.showGeoJson", geoJson);
+    }
+
+    public async Task FlyTo(double lat, double lon, int zoom)
+    {
+        if (_initialized)
+            await JS.InvokeVoidAsync("leafletInterop.flyTo", lat, lon, zoom);
+    }
+
+    public async Task ClearLayers()
+    {
+        if (_initialized)
+            await JS.InvokeVoidAsync("leafletInterop.clearLayers");
+    }
+}

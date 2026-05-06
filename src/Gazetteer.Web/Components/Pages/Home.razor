@@ -1,0 +1,107 @@
+@page "/"
+@using Gazetteer.Core.DTOs
+@using Gazetteer.Web.Services
+@inject GazetteerApiClient Api
+
+<div class="gazetteer-container">
+    <div class="search-panel">
+        <SearchBox OnSearch="HandleSearch" />
+        <FilterPanel OnFilterChanged="HandleFilterChanged" />
+
+        @if (_isLoading)
+        {
+            <div class="loading">Searching...</div>
+        }
+        else if (_results.Count > 0)
+        {
+            <SearchResults Results="_results" OnResultSelected="HandleResultSelected" SelectedId="_selectedId" />
+        }
+        else if (_hasSearched)
+        {
+            <div class="no-results">No results found</div>
+        }
+    </div>
+
+    <div class="map-panel">
+        @if (_selectedDetail != null)
+        {
+            <LocationDetail Detail="_selectedDetail" OnClose="HandleDetailClose" />
+        }
+        <LeafletMap @ref="_map" />
+    </div>
+</div>
+
+@code {
+    private List<SearchResultDto> _results = [];
+    private LocationDetailDto? _selectedDetail;
+    private int? _selectedId;
+    private bool _isLoading;
+    private bool _hasSearched;
+    private string _currentQuery = string.Empty;
+    private string? _countryFilter;
+    private string? _typeFilter;
+    private LeafletMap _map = default!;
+
+    private async Task HandleSearch(string query)
+    {
+        _currentQuery = query;
+        if (string.IsNullOrWhiteSpace(query))
+        {
+            _results = [];
+            _hasSearched = false;
+            return;
+        }
+
+        _isLoading = true;
+        _hasSearched = true;
+        StateHasChanged();
+
+        try
+        {
+            _results = await Api.SearchAsync(query, _countryFilter, _typeFilter);
+        }
+        catch
+        {
+            _results = [];
+        }
+        finally
+        {
+            _isLoading = false;
+            StateHasChanged();
+        }
+    }
+
+    private async Task HandleFilterChanged((string? Country, string? Type) filters)
+    {
+        _countryFilter = filters.Country;
+        _typeFilter = filters.Type;
+        if (!string.IsNullOrWhiteSpace(_currentQuery))
+            await HandleSearch(_currentQuery);
+    }
+
+    private async Task HandleResultSelected(SearchResultDto result)
+    {
+        _selectedId = result.Id;
+        _selectedDetail = await Api.GetLocationAsync(result.Id);
+
+        await _map.FlyTo(result.Lat, result.Lon, 12);
+        await _map.SetMarker(result.Lat, result.Lon, result.Name);
+
+        if (result.HasGeometry)
+        {
+            var geoJson = await Api.GetGeometryAsync(result.Id);
+            if (geoJson != null)
+                await _map.ShowGeoJson(geoJson);
+        }
+
+        StateHasChanged();
+    }
+
+    private async Task HandleDetailClose()
+    {
+        _selectedDetail = null;
+        _selectedId = null;
+        await _map.ClearLayers();
+        StateHasChanged();
+    }
+}

@@ -1,0 +1,43 @@
+@using Gazetteer.Core.Models
+@using Gazetteer.Web.Services
+@inject GazetteerApiClient Api
+
+<div class="filter-panel">
+    <select @bind="_selectedCountry" @bind:after="OnFilterChanged">
+        <option value="">All countries</option>
+        @foreach (var country in _countries)
+        {
+            <option value="@country.Code">@country.Name</option>
+        }
+    </select>
+
+    <select @bind="_selectedType" @bind:after="OnFilterChanged">
+        <option value="">All types</option>
+        @foreach (var type in _locationTypes)
+        {
+            <option value="@type.Value">@type.Label</option>
+        }
+    </select>
+</div>
+
+@code {
+    [Parameter] public EventCallback<(string? Country, string? Type)> OnFilterChanged { get; set; }
+
+    private List<Country> _countries = [];
+    private List<LocationTypeOption> _locationTypes = [];
+    private string _selectedCountry = string.Empty;
+    private string _selectedType = string.Empty;
+
+    protected override async Task OnInitializedAsync()
+    {
+        _countries = await Api.GetCountriesAsync();
+        _locationTypes = await Api.GetLocationTypesAsync();
+    }
+
+    private async Task OnFilterChanged()
+    {
+        var country = string.IsNullOrEmpty(_selectedCountry) ? null : _selectedCountry;
+        var type = string.IsNullOrEmpty(_selectedType) ? null : _selectedType;
+        await OnFilterChanged.InvokeAsync((country, type));
+    }
+}
