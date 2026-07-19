@@ -13,10 +13,16 @@
                     </h5>
                     <SearchBox OnSearch="HandleSearch" />
                     <FilterPanel Countries="_countries"
+                                 LocationGroups="_locationGroups"
                                  SelectedCountry="_selectedCountry"
                                  SelectedLocationType="_selectedLocationType"
+                                 SelectedLocationGroupId="_selectedLocationGroupId"
+                                 UseLocationGroup="_useLocationGroup"
                                  OnCountryChanged="HandleCountryChanged"
-                                 OnLocationTypeChanged="HandleLocationTypeChanged" />
+                                 OnLocationTypeChanged="HandleLocationTypeChanged"
+                                 OnLocationGroupChanged="HandleLocationGroupChanged"
+                                 OnUseLocationGroupChanged="HandleUseLocationGroupChanged"
+                                 OnManageGroups="() => _showGroupManager = true" />
                 </div>
             </div>
 
@@ -45,13 +51,22 @@
     </div>
 </div>
 
+<LocationGroupManager IsVisible="_showGroupManager"
+                      Groups="_locationGroups"
+                      OnClose="() => _showGroupManager = false"
+                      OnChanged="RefreshLocationGroupsAsync" />
+
 @code {
     private List<Country> _countries = new();
+    private List<LocationGroupSummaryDto> _locationGroups = new();
     private List<SearchResultDto> _results = new();
     private SearchResultDto? _selectedLocation;
     private LocationDetailDto? _selectedDetail;
     private string? _selectedCountry;
     private LocationType? _selectedLocationType;
+    private Guid? _selectedLocationGroupId;
+    private bool _useLocationGroup;
+    private bool _showGroupManager;
     private bool _isLoading;
     private string _lastQuery = string.Empty;
 
@@ -70,6 +85,28 @@
         {
             // API might not be available yet
         }
+
+        await RefreshLocationGroupsAsync();
+    }
+
+    private async Task RefreshLocationGroupsAsync()
+    {
+        try
+        {
+            _locationGroups = await Api.GetLocationGroupsAsync();
+            if (_selectedLocationGroupId.HasValue &&
+                _locationGroups.All(g => g.Id != _selectedLocationGroupId.Value))
+            {
+                _selectedLocationGroupId = null;
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Failed to load location groups");
+            _locationGroups = new();
+        }
+
+        StateHasChanged();
     }
 
     private async Task HandleSearch(string query)
@@ -86,7 +123,9 @@
 
         try
         {
-            _results = await Api.SearchAsync(query, _selectedCountry, _selectedLocationType);
+            var groupId = _useLocationGroup ? _selectedLocationGroupId : null;
+            var type = _useLocationGroup ? null : _selectedLocationType;
+            _results = await Api.SearchAsync(query, _selectedCountry, type, groupId);
         }
         catch (Exception ex)
         {
@@ -143,6 +182,25 @@
     private async Task HandleLocationTypeChanged(LocationType? type)
     {
         _selectedLocationType = type;
+        if (!string.IsNullOrEmpty(_lastQuery))
+            await HandleSearch(_lastQuery);
+    }
+
+    private async Task HandleLocationGroupChanged(Guid? groupId)
+    {
+        _selectedLocationGroupId = groupId;
+        if (!string.IsNullOrEmpty(_lastQuery))
+            await HandleSearch(_lastQuery);
+    }
+
+    private async Task HandleUseLocationGroupChanged(bool useGroup)
+    {
+        _useLocationGroup = useGroup;
+        if (useGroup)
+            _selectedLocationType = null;
+        else
+            _selectedLocationGroupId = null;
+
         if (!string.IsNullOrEmpty(_lastQuery))
             await HandleSearch(_lastQuery);
     }

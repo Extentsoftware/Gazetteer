@@ -10,17 +10,20 @@ public class SearchService : ISearchService
 {
     private readonly IElasticsearchService _elasticsearch;
     private readonly ILocationRepository _repository;
+    private readonly ILocationGroupService _locationGroups;
     private readonly IMemoryCache _cache;
     private readonly ILogger<SearchService> _logger;
 
     public SearchService(
         IElasticsearchService elasticsearch,
         ILocationRepository repository,
+        ILocationGroupService locationGroups,
         IMemoryCache cache,
         ILogger<SearchService> logger)
     {
         _elasticsearch = elasticsearch;
         _repository = repository;
+        _locationGroups = locationGroups;
         _cache = cache;
         _logger = logger;
     }
@@ -30,7 +33,12 @@ public class SearchService : ISearchService
         if (string.IsNullOrWhiteSpace(request.Query) || request.Query.Length < 2)
             return [];
 
-        var cacheKey = $"search:{request.Query}:{request.CountryCode}:{request.LocationType}:{request.Limit}";
+        await ResolveTypeBoostsAsync(request, ct);
+
+        var typeKey = request.TypeBoosts is { Count: > 0 }
+            ? string.Join(',', request.TypeBoosts.Select(t => $"{t.LocationType}:{t.Boost}"))
+            : request.LocationType?.ToString() ?? "";
+        var cacheKey = $"search:{request.Query}:{request.CountryCode}:{request.LocationGroupId}:{typeKey}:{request.Limit}";
         if (_cache.TryGetValue(cacheKey, out List<SearchResultDto>? cached) && cached != null)
             return cached;
 
@@ -60,6 +68,46 @@ public class SearchService : ISearchService
 
         _cache.Set(cacheKey, results, TimeSpan.FromSeconds(30));
         return results;
+    }
+
+    private async Task ResolveTypeBoostsAsync(GazetteerSearchRequest request, CancellationToken ct)
+    {
+        if (request.TypeBoosts is { Count: > 0 })
+            return;
+
+        if (request.LocationGroupId is Guid groupId)
+        {
+            var group = await _locationGroups.GetAsync(groupId, ct);
+            if (group == null || group.Members.Count == 0)
+            {
+                _logger.LogWarning("Location group {GroupId} not found or empty; searching all types", groupId);
+                request.LocationGroupId = null;
+                return;
+            }
+
+            request.LocationType = null;
+            request.TypeBoosts = group.Members
+                .OrderBy(m => m.Rank)
+                .Select(m => new LocationTypeBoost
+                {
+                    LocationType = m.LocationType,
+                    Boost = m.Boost
+                })
+                .ToList();
+            return;
+        }
+
+        if (request.LocationType.HasValue)
+        {
+            request.TypeBoosts =
+            [
+                new LocationTypeBoost
+                {
+                    LocationType = request.LocationType.Value,
+                    Boost = 1f
+                }
+            ];
+        }
     }
 
     public async Task<LocationDetailDto?> GetLocationDetailAsync(long id, CancellationToken ct = default)

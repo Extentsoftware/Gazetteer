@@ -5,6 +5,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using NetTopologySuite.Geometries;
 using NetTopologySuite.Geometries.Prepared;
+using System.Threading;
 
 namespace Gazetteer.Seeder.Services;
 
@@ -139,10 +140,12 @@ public class HierarchyBuilder
             if (batch.Count == 0) break;
             lastId = batch[^1].Id;
 
-            int batchAssigned = 0;
-            foreach (var location in batch)
+            // Each location's containment lookup is independent, read-only spatial work against
+            // the shared prepared-geometry index, so it parallelizes cleanly across cores.
+            var batchAssigned = 0;
+            Parallel.ForEach(batch, location =>
             {
-                if (location.Latitude == 0 && location.Longitude == 0) continue;
+                if (location.Latitude == 0 && location.Longitude == 0) return;
 
                 var point = new Point(location.Longitude, location.Latitude) { SRID = 4326 };
 
@@ -154,9 +157,9 @@ public class HierarchyBuilder
                 if (parent != null)
                 {
                     location.ParentId = parent.Id;
-                    batchAssigned++;
+                    Interlocked.Increment(ref batchAssigned);
                 }
-            }
+            });
 
             batchDb.ChangeTracker.DetectChanges();
             await batchDb.SaveChangesAsync(ct);
@@ -233,15 +236,17 @@ public class HierarchyBuilder
             if (batch.Count == 0) break;
             lastId = batch[^1].Id;
 
-            int batchAssigned = 0;
-            foreach (var location in batch)
+            // Nearest-candidate search per location is independent, read-only work against the
+            // shared by-parent lookup, so it parallelizes cleanly across cores.
+            var batchAssigned = 0;
+            Parallel.ForEach(batch, location =>
             {
-                if (location.Latitude == 0 && location.Longitude == 0) continue;
-                if (!location.ParentId.HasValue) continue;
+                if (location.Latitude == 0 && location.Longitude == 0) return;
+                if (!location.ParentId.HasValue) return;
 
                 // Find sub-localities under the same admin parent
                 if (!subLocalitiesByParent.TryGetValue(location.ParentId.Value, out var candidates))
-                    continue;
+                    return;
 
                 // Find nearest sub-locality by distance
                 double bestDist = double.MaxValue;
@@ -262,9 +267,9 @@ public class HierarchyBuilder
                 if (bestId.HasValue && bestDist < 0.0025)
                 {
                     location.ParentId = bestId.Value;
-                    batchAssigned++;
+                    Interlocked.Increment(ref batchAssigned);
                 }
-            }
+            });
 
             batchDb.ChangeTracker.DetectChanges();
             await batchDb.SaveChangesAsync(ct);

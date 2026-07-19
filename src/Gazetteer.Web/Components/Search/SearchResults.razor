@@ -73,7 +73,7 @@ else if (Results.Count == 0 && SelectedId == null)
     {
         if (result.LocationType == LocationType.Amenity && !string.IsNullOrEmpty(result.SubType))
         {
-            return result.SubType switch
+            var subtypeLabel = result.SubType switch
             {
                 "hospital" => "Hospital",
                 "clinic" => "Clinic",
@@ -96,6 +96,8 @@ else if (Results.Count == 0 && SelectedId == null)
                 "halt" => "Railway Halt",
                 _ => result.SubType
             };
+            // Show underlying LocationType so Amenity subtypes aren't confused with enum values
+            return $"Amenity · {subtypeLabel}";
         }
         return result.LocationType.ToString();
     }

@@ -195,7 +195,7 @@
     {
         if (firstRender)
         {
-            var apiUrl = Configuration["ApiSettings:BaseUrl"] ?? "http://localhost:50730";
+            var apiUrl = Configuration["ApiSettings:BaseUrl"] ?? "http://localhost:5100";
             _chatService.OnTextReceived += text => InvokeAsync(async () => { _streamingText += text; StateHasChanged(); await ScrollChat(); });
             _chatService.OnProgressReceived += msg => InvokeAsync(() => { _progressText = msg; StateHasChanged(); });
             _chatService.OnCandidatesReceived += json => InvokeAsync(() => HandleCandidates(json));

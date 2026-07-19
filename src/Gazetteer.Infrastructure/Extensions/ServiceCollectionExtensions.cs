@@ -20,7 +20,14 @@ public static class ServiceCollectionExtensions
         services.AddDbContext<GazetteerDbContext>(options =>
             options.UseNpgsql(
                 configuration.GetConnectionString("DefaultConnection"),
-                npgsql => npgsql.UseNetTopologySuite()
+                npgsql => npgsql
+                    .UseNetTopologySuite()
+                    // Port-forwarded/tunnelled connections can drop transiently; retry with backoff
+                    // instead of failing the whole run.
+                    .EnableRetryOnFailure(
+                        maxRetryCount: 6,
+                        maxRetryDelay: TimeSpan.FromSeconds(30),
+                        errorCodesToAdd: null)
             )
         );
 
@@ -36,6 +43,7 @@ public static class ServiceCollectionExtensions
         services.AddScoped<ILocationRepository, LocationRepository>();
         services.AddScoped<IElasticsearchService, ElasticsearchService>();
         services.AddScoped<ISearchService, SearchService>();
+        services.AddScoped<ILocationGroupService, LocationGroupService>();
 
         // Caching
         services.AddMemoryCache();

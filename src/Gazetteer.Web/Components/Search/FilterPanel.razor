@@ -1,4 +1,15 @@
 <div class="row g-2">
+    <div class="col-12">
+        <div class="form-check">
+            <input class="form-check-input" type="checkbox" id="useLocationGroup"
+                   checked="@UseLocationGroup"
+                   @onchange="OnUseGroupToggle" />
+            <label class="form-check-label small" for="useLocationGroup">
+                Filter by location group
+            </label>
+        </div>
+    </div>
+
     <div class="col-6">
         <label class="form-label small text-muted mb-1">Country</label>
         <select class="form-select form-select-sm" @onchange="OnCountrySelect">
@@ -11,26 +22,57 @@
             }
         </select>
     </div>
-    <div class="col-6">
-        <label class="form-label small text-muted mb-1">Location type</label>
-        <select class="form-select form-select-sm" @onchange="OnTypeSelect">
-            <option value="">All types</option>
-            @foreach (var type in Enum.GetValues<LocationType>())
-            {
-                <option value="@((int)type)" selected="@(type == SelectedLocationType)">
-                    @FormatTypeName(type)
-                </option>
-            }
-        </select>
-    </div>
+
+    @if (UseLocationGroup)
+    {
+        <div class="col-6">
+            <label class="form-label small text-muted mb-1">Location group</label>
+            <div class="input-group input-group-sm">
+                <select class="form-select form-select-sm" @onchange="OnGroupSelect">
+                    <option value="">Select a group...</option>
+                    @foreach (var group in LocationGroups)
+                    {
+                        <option value="@group.Id" selected="@(group.Id == SelectedLocationGroupId)">
+                            @group.Name (@group.MemberCount)
+                        </option>
+                    }
+                </select>
+                <button type="button" class="btn btn-outline-secondary" title="Manage groups"
+                        @onclick="() => OnManageGroups.InvokeAsync()">
+                    <i class="bi bi-gear"></i>
+                </button>
+            </div>
+        </div>
+    }
+    else
+    {
+        <div class="col-6">
+            <label class="form-label small text-muted mb-1">Location type</label>
+            <select class="form-select form-select-sm" @onchange="OnTypeSelect">
+                <option value="">All types</option>
+                @foreach (var type in Enum.GetValues<LocationType>())
+                {
+                    <option value="@((int)type)" selected="@(type == SelectedLocationType)">
+                        @FormatTypeName(type)
+                    </option>
+                }
+            </select>
+        </div>
+    }
 </div>
 
 @code {
     [Parameter] public List<Country> Countries { get; set; } = new();
+    [Parameter] public List<LocationGroupSummaryDto> LocationGroups { get; set; } = new();
     [Parameter] public string? SelectedCountry { get; set; }
     [Parameter] public LocationType? SelectedLocationType { get; set; }
+    [Parameter] public Guid? SelectedLocationGroupId { get; set; }
+    [Parameter] public bool UseLocationGroup { get; set; }
     [Parameter] public EventCallback<string?> OnCountryChanged { get; set; }
     [Parameter] public EventCallback<LocationType?> OnLocationTypeChanged { get; set; }
+    [Parameter] public EventCallback<Guid?> OnLocationGroupChanged { get; set; }
+    [Parameter] public EventCallback<bool> OnUseLocationGroupChanged { get; set; }
+    [Parameter] public EventCallback OnManageGroups { get; set; }
 
     private async Task OnCountrySelect(ChangeEventArgs e)
     {
@@ -45,6 +87,21 @@
             await OnLocationTypeChanged.InvokeAsync(null);
         else if (int.TryParse(value, out var typeInt))
             await OnLocationTypeChanged.InvokeAsync((LocationType)typeInt);
+    }
+
+    private async Task OnGroupSelect(ChangeEventArgs e)
+    {
+        var value = e.Value?.ToString();
+        if (string.IsNullOrEmpty(value) || !Guid.TryParse(value, out var id))
+            await OnLocationGroupChanged.InvokeAsync(null);
+        else
+            await OnLocationGroupChanged.InvokeAsync(id);
+    }
+
+    private async Task OnUseGroupToggle(ChangeEventArgs e)
+    {
+        var enabled = e.Value is bool b && b || e.Value?.ToString() == "true";
+        await OnUseLocationGroupChanged.InvokeAsync(enabled);
     }
 
     private static string FormatTypeName(LocationType type) => type switch

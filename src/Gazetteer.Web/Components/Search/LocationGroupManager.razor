@@ -1,0 +1,337 @@
+@if (IsVisible)
+{
+    <div class="modal fade show d-block" tabindex="-1" style="background: rgba(0,0,0,.4);">
+        <div class="modal-dialog modal-lg modal-dialog-scrollable">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">Manage location groups</h5>
+                    <button type="button" class="btn-close" @onclick="CloseAsync"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="row">
+                        <div class="col-md-4 border-end">
+                            <div class="d-flex justify-content-between align-items-center mb-2">
+                                <span class="fw-semibold small text-muted">Groups</span>
+                                <button type="button" class="btn btn-sm btn-primary" @onclick="StartCreate">
+                                    <i class="bi bi-plus"></i> New
+                                </button>
+                            </div>
+                            @if (Groups.Count == 0)
+                            {
+                                <p class="small text-muted">No groups yet.</p>
+                            }
+                            else
+                            {
+                                <div class="list-group list-group-flush">
+                                    @foreach (var group in Groups)
+                                    {
+                                        <button type="button"
+                                                class="list-group-item list-group-item-action py-2 @(_editingId == group.Id ? "active" : "")"
+                                                @onclick="() => LoadGroupAsync(group.Id)">
+                                            <div class="fw-semibold">@group.Name</div>
+                                            <small class="@(_editingId == group.Id ? "text-white-50" : "text-muted")">
+                                                @group.MemberCount type(s)
+                                            </small>
+                                        </button>
+                                    }
+                                </div>
+                            }
+                        </div>
+
+                        <div class="col-md-8">
+                            @if (_isEditing)
+                            {
+                                <div class="mb-3">
+                                    <label class="form-label">Name</label>
+                                    <input class="form-control" @bind="_name" maxlength="200" />
+                                </div>
+
+                                <div class="mb-2 fw-semibold small text-muted">Location types (rank &amp; boost)</div>
+                                <p class="small text-muted">
+                                    Rank 1 is most important. Boost is applied in Elasticsearch scoring.
+                                    Default boost = (count − rank + 1) × 10.
+                                </p>
+
+                                <div class="table-responsive">
+                                    <table class="table table-sm align-middle">
+                                        <thead>
+                                            <tr>
+                                                <th style="width: 2rem;"></th>
+                                                <th>Type</th>
+                                                <th style="width: 5rem;">Rank</th>
+                                                <th style="width: 6rem;">Boost</th>
+                                                <th style="width: 5rem;"></th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            @foreach (var type in Enum.GetValues<LocationType>())
+                                            {
+                                                var member = _members.FirstOrDefault(m => m.LocationType == type);
+                                                var selected = member != null;
+                                                <tr class="@(selected ? "" : "table-light text-muted")">
+                                                    <td>
+                                                        <input type="checkbox" class="form-check-input"
+                                                               checked="@selected"
+                                                               @onchange="e => ToggleType(type, e)" />
+                                                    </td>
+                                                    <td>@FormatTypeName(type)</td>
+                                                    <td>
+                                                        @if (selected)
+                                                        {
+                                                            <span class="badge bg-secondary">@member!.Rank</span>
+                                                        }
+                                                    </td>
+                                                    <td>
+                                                        @if (selected)
+                                                        {
+                                                            <input type="number" class="form-control form-control-sm"
+                                                                   min="1" step="1" value="@member!.Boost"
+                                                                   @onchange="e => SetBoost(type, e)" />
+                                                        }
+                                                    </td>
+                                                    <td>
+                                                        @if (selected)
+                                                        {
+                                                            <div class="btn-group btn-group-sm">
+                                                                <button type="button" class="btn btn-outline-secondary"
+                                                                        title="Move up" disabled="@(member!.Rank <= 1)"
+                                                                        @onclick="() => Move(type, -1)">
+                                                                    <i class="bi bi-arrow-up"></i>
+                                                                </button>
+                                                                <button type="button" class="btn btn-outline-secondary"
+                                                                        title="Move down" disabled="@(member!.Rank >= _members.Count)"
+                                                                        @onclick="() => Move(type, 1)">
+                                                                    <i class="bi bi-arrow-down"></i>
+                                                                </button>
+                                                            </div>
+                                                        }
+                                                    </td>
+                                                </tr>
+                                            }
+                                        </tbody>
+                                    </table>
+                                </div>
+
+                                @if (!string.IsNullOrEmpty(_error))
+                                {
+                                    <div class="alert alert-danger py-2 small">@_error</div>
+                                }
+
+                                <div class="d-flex gap-2 mt-3">
+                                    <button type="button" class="btn btn-primary" disabled="@_saving" @onclick="SaveAsync">
+                                        @(_saving ? "Saving..." : "Save")
+                                    </button>
+                                    @if (_editingId.HasValue)
+                                    {
+                                        <button type="button" class="btn btn-outline-danger" disabled="@_saving" @onclick="DeleteAsync">
+                                            Delete
+                                        </button>
+                                    }
+                                    <button type="button" class="btn btn-outline-secondary" @onclick="CancelEdit">
+                                        Cancel
+                                    </button>
+                                </div>
+                            }
+                            else
+                            {
+                                <div class="text-muted text-center py-5">
+                                    <p class="mb-0">Select a group to edit, or create a new one.</p>
+                                </div>
+                            }
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+}
+
+@code {
+    [Parameter] public bool IsVisible { get; set; }
+    [Parameter] public List<LocationGroupSummaryDto> Groups { get; set; } = new();
+    [Parameter] public EventCallback OnClose { get; set; }
+    [Parameter] public EventCallback OnChanged { get; set; }
+    [Inject] public GazetteerApiClient Api { get; set; } = default!;
+
+    private bool _isEditing;
+    private Guid? _editingId;
+    private string _name = string.Empty;
+    private List<LocationGroupMemberDto> _members = new();
+    private string? _error;
+    private bool _saving;
+
+    private void StartCreate()
+    {
+        _isEditing = true;
+        _editingId = null;
+        _name = string.Empty;
+        _members = new();
+        _error = null;
+    }
+
+    private void CancelEdit()
+    {
+        _isEditing = false;
+        _editingId = null;
+        _name = string.Empty;
+        _members = new();
+        _error = null;
+    }
+
+    private async Task LoadGroupAsync(Guid id)
+    {
+        _error = null;
+        try
+        {
+            var detail = await Api.GetLocationGroupAsync(id);
+            if (detail == null)
+            {
+                _error = "Group not found.";
+                return;
+            }
+
+            _isEditing = true;
+            _editingId = detail.Id;
+            _name = detail.Name;
+            _members = detail.Members.OrderBy(m => m.Rank).ToList();
+        }
+        catch (Exception ex)
+        {
+            _error = ex.Message;
+        }
+    }
+
+    private void ToggleType(LocationType type, ChangeEventArgs e)
+    {
+        var enabled = e.Value is bool b && b || e.Value?.ToString() == "true";
+        if (enabled)
+        {
+            if (_members.Any(m => m.LocationType == type))
+                return;
+
+            _members.Add(new LocationGroupMemberDto
+            {
+                LocationType = type,
+                Rank = _members.Count + 1,
+                Boost = 10f
+            });
+            RenumberAndRecalcDefaults(preserveCustomBoosts: false);
+        }
+        else
+        {
+            _members.RemoveAll(m => m.LocationType == type);
+            RenumberAndRecalcDefaults(preserveCustomBoosts: true);
+        }
+    }
+
+    private void SetBoost(LocationType type, ChangeEventArgs e)
+    {
+        var member = _members.FirstOrDefault(m => m.LocationType == type);
+        if (member == null) return;
+        if (float.TryParse(e.Value?.ToString(), out var boost) && boost > 0)
+            member.Boost = boost;
+    }
+
+    private void Move(LocationType type, int delta)
+    {
+        var ordered = _members.OrderBy(m => m.Rank).ToList();
+        var index = ordered.FindIndex(m => m.LocationType == type);
+        var newIndex = index + delta;
+        if (index < 0 || newIndex < 0 || newIndex >= ordered.Count)
+            return;
+
+        (ordered[index], ordered[newIndex]) = (ordered[newIndex], ordered[index]);
+        _members = ordered;
+        RenumberAndRecalcDefaults(preserveCustomBoosts: true);
+    }
+
+    private void RenumberAndRecalcDefaults(bool preserveCustomBoosts)
+    {
+        var ordered = _members.OrderBy(m => m.Rank).ThenBy(m => m.LocationType).ToList();
+        for (var i = 0; i < ordered.Count; i++)
+        {
+            ordered[i].Rank = i + 1;
+            if (!preserveCustomBoosts)
+                ordered[i].Boost = (ordered.Count - i) * 10f;
+        }
+        _members = ordered;
+    }
+
+    private async Task SaveAsync()
+    {
+        _error = null;
+        if (string.IsNullOrWhiteSpace(_name))
+        {
+            _error = "Name is required.";
+            return;
+        }
+        if (_members.Count == 0)
+        {
+            _error = "Select at least one location type.";
+            return;
+        }
+
+        _saving = true;
+        try
+        {
+            var request = new UpsertLocationGroupRequest
+            {
+                Name = _name.Trim(),
+                Members = _members.OrderBy(m => m.Rank).ToList()
+            };
+
+            if (_editingId.HasValue)
+                await Api.UpdateLocationGroupAsync(_editingId.Value, request);
+            else
+                await Api.CreateLocationGroupAsync(request);
+
+            await OnChanged.InvokeAsync();
+            CancelEdit();
+        }
+        catch (Exception ex)
+        {
+            _error = ex.Message;
+        }
+        finally
+        {
+            _saving = false;
+        }
+    }
+
+    private async Task DeleteAsync()
+    {
+        if (!_editingId.HasValue) return;
+        _saving = true;
+        _error = null;
+        try
+        {
+            await Api.DeleteLocationGroupAsync(_editingId.Value);
+            await OnChanged.InvokeAsync();
+            CancelEdit();
+        }
+        catch (Exception ex)
+        {
+            _error = ex.Message;
+        }
+        finally
+        {
+            _saving = false;
+        }
+    }
+
+    private async Task CloseAsync()
+    {
+        CancelEdit();
+        await OnClose.InvokeAsync();
+    }
+
+    private static string FormatTypeName(LocationType type) => type switch
+    {
+        LocationType.AdminRegion1 => "Admin Region 1",
+        LocationType.AdminRegion2 => "Admin Region 2",
+        LocationType.AdminRegion3 => "Admin Region 3",
+        LocationType.PostcodeDistrict => "Postcode District",
+        LocationType.PostcodeArea => "Postcode Area",
+        _ => type.ToString()
+    };
+}

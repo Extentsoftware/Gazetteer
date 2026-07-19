@@ -21,6 +21,7 @@ public class SearchController : ControllerBase
         [FromQuery] string q,
         [FromQuery] string? country = null,
         [FromQuery] LocationType? type = null,
+        [FromQuery] Guid? groupId = null,
         [FromQuery] long? within = null,
         [FromQuery] int limit = 20,
         CancellationToken ct = default)
@@ -35,7 +36,9 @@ public class SearchController : ControllerBase
         {
             Query = q,
             CountryCode = country,
-            LocationType = type,
+            // groupId takes precedence over a single type filter
+            LocationType = groupId.HasValue ? null : type,
+            LocationGroupId = groupId,
             WithinOsmId = within,
             Limit = limit
         };

@@ -363,7 +363,8 @@ public class ElasticsearchService : IElasticsearchService
             });
 
             // Should: boost signals for ranking
-            b.Should(
+            var shouldClauses = new List<Action<QueryDescriptor<LocationIndexDocument>>>
+            {
                 // Exact keyword match on name — highest boost
                 s => s.ConstantScore(cs => cs
                     .Filter(f => f.Term(t => t
@@ -404,7 +405,26 @@ public class ElasticsearchService : IElasticsearchService
                     .Operator(Operator.And)
                     .Boost(50)
                 )
-            );
+            };
+
+            // Location-group type boosts (rank importance within a group)
+            if (request.TypeBoosts is { Count: > 0 })
+            {
+                foreach (var typeBoost in request.TypeBoosts.Where(t => t.Boost > 1f))
+                {
+                    var typeName = typeBoost.LocationType.ToString();
+                    var boost = typeBoost.Boost;
+                    shouldClauses.Add(s => s.ConstantScore(cs => cs
+                        .Filter(f => f.Term(t => t
+                            .Field(d => d.LocationType)
+                            .Value(typeName)
+                        ))
+                        .Boost(boost)
+                    ));
+                }
+            }
+
+            b.Should(shouldClauses.ToArray());
 
             var filters = new List<Action<QueryDescriptor<LocationIndexDocument>>>();
 
@@ -416,7 +436,18 @@ public class ElasticsearchService : IElasticsearchService
                 ));
             }
 
-            if (request.LocationType.HasValue)
+            if (request.TypeBoosts is { Count: > 0 })
+            {
+                var typeNames = request.TypeBoosts
+                    .Select(t => FieldValue.String(t.LocationType.ToString()))
+                    .ToArray();
+
+                filters.Add(f => f.Terms(t => t
+                    .Field(d => d.LocationType)
+                    .Terms(new TermsQueryField(typeNames))
+                ));
+            }
+            else if (request.LocationType.HasValue)
             {
                 filters.Add(f => f.Term(t => t
                     .Field(d => d.LocationType)

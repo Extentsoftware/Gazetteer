@@ -1,6 +1,8 @@
 using Gazetteer.AI.Extensions;
 using Gazetteer.Api.Hubs;
+using Gazetteer.Infrastructure.Data;
 using Gazetteer.Infrastructure.Extensions;
+using Microsoft.EntityFrameworkCore;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -37,6 +39,12 @@ builder.Services.AddCors(options =>
 });
 
 var app = builder.Build();
+
+using (var scope = app.Services.CreateScope())
+{
+    var db = scope.ServiceProvider.GetRequiredService<GazetteerDbContext>();
+    await db.Database.MigrateAsync();
+}
 
 app.UseSwagger();
 app.UseSwaggerUI(c => c.SwaggerEndpoint("/swagger/v1/swagger.json", "Gazetteer API v1"));
