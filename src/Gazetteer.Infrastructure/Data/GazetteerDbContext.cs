@@ -10,6 +10,8 @@ public class GazetteerDbContext : DbContext
 
     public DbSet<Location> Locations => Set<Location>();
     public DbSet<Country> Countries => Set<Country>();
+    public DbSet<LocationGroup> LocationGroups => Set<LocationGroup>();
+    public DbSet<LocationGroupMember> LocationGroupMembers => Set<LocationGroupMember>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -19,5 +21,7 @@ public class GazetteerDbContext : DbContext
 
         modelBuilder.ApplyConfiguration(new LocationConfiguration());
         modelBuilder.ApplyConfiguration(new CountryConfiguration());
+        modelBuilder.ApplyConfiguration(new LocationGroupConfiguration());
+        modelBuilder.ApplyConfiguration(new LocationGroupMemberConfiguration());
     }
 }

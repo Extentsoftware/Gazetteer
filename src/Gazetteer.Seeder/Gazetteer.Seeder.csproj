@@ -3,6 +3,10 @@
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <RootNamespace>Gazetteer.Seeder</RootNamespace>
+    <!-- Batch seeding is high-allocation (millions of Location/geometry objects); server GC
+         with concurrent collection suits this far better than the workstation GC default. -->
+    <ServerGarbageCollection>true</ServerGarbageCollection>
+    <ConcurrentGarbageCollection>true</ConcurrentGarbageCollection>
   </PropertyGroup>
 
   <ItemGroup>

@@ -5,6 +5,13 @@ namespace Gazetteer.Seeder.Services;
 
 public class PbfDownloader
 {
+    /// <summary>
+    /// A local file younger than this is assumed to still be fresh, so the upstream
+    /// freshness check (HEAD request to Geofabrik) is skipped entirely to avoid
+    /// unnecessary network calls on every seeder run.
+    /// </summary>
+    private static readonly TimeSpan MaxFileAgeBeforeFreshnessCheck = TimeSpan.FromDays(30);
+
     private readonly HttpClient _httpClient;
     private readonly ILogger<PbfDownloader> _logger;
 
@@ -14,7 +21,16 @@ public class PbfDownloader
         _logger = logger;
     }
 
-    public async Task<string> DownloadAsync(string countryCode, string dataDir, CancellationToken ct = default)
+    /// <summary>
+    /// Downloads the country's PBF file, skipping the download if a local copy already
+    /// exists and appears up to date.
+    /// </summary>
+    /// <param name="seedCheckpointUtc">
+    /// The LastWriteTimeUtc of the file that was used the last time this country was
+    /// successfully seeded (if known). If the file on disk is older than this, it was
+    /// evidently swapped for a stale/partial copy since then, so it is re-downloaded.
+    /// </param>
+    public async Task<string> DownloadAsync(string countryCode, string dataDir, DateTime? seedCheckpointUtc = null, CancellationToken ct = default)
     {
         if (!CountryConfig.EuUkCountries.TryGetValue(countryCode, out var countryInfo))
             throw new ArgumentException($"Unknown country code: {countryCode}");
@@ -24,8 +40,32 @@ public class PbfDownloader
 
         if (File.Exists(filePath))
         {
-            _logger.LogInformation("File already exists: {FilePath}, skipping download", filePath);
-            return filePath;
+            var localTimestampUtc = File.GetLastWriteTimeUtc(filePath);
+
+            var fileAge = DateTime.UtcNow - localTimestampUtc;
+
+            if (seedCheckpointUtc is not null && localTimestampUtc < seedCheckpointUtc)
+            {
+                _logger.LogWarning(
+                    "Local file {FilePath} ({LocalDate:u}) is older than the seed checkpoint recorded for {Country} ({Checkpoint:u}); re-downloading",
+                    filePath, localTimestampUtc, countryCode, seedCheckpointUtc);
+            }
+            else if (fileAge <= MaxFileAgeBeforeFreshnessCheck)
+            {
+                _logger.LogInformation(
+                    "File already exists and is only {AgeDays:N0} day(s) old (< {ThresholdDays:N0}-day freshness check threshold): {FilePath}, skipping download",
+                    fileAge.TotalDays, MaxFileAgeBeforeFreshnessCheck.TotalDays, filePath);
+                return filePath;
+            }
+            else if (await IsRemoteNewerAsync(url, localTimestampUtc, countryCode, ct))
+            {
+                _logger.LogInformation("Newer {Country} file available upstream; re-downloading", countryCode);
+            }
+            else
+            {
+                _logger.LogInformation("File already exists and is up to date: {FilePath}, skipping download", filePath);
+                return filePath;
+            }
         }
 
         Directory.CreateDirectory(dataDir);
@@ -60,7 +100,43 @@ public class PbfDownloader
             }
         }
 
+        fileStream.Close();
+
+        // Preserve the upstream Last-Modified date on disk (rather than "now") so future
+        // freshness comparisons reflect the actual source data date, not download time.
+        if (response.Content.Headers.LastModified is DateTimeOffset lastModified)
+        {
+            File.SetLastWriteTimeUtc(filePath, lastModified.UtcDateTime);
+        }
+
         _logger.LogInformation("Downloaded {Country}: {Size:N0} bytes to {Path}", countryInfo.Name, totalRead, filePath);
         return filePath;
+    }
+
+    /// <summary>
+    /// Issues a HEAD request to check whether the upstream file has been updated since
+    /// our local copy's timestamp. Failures are treated as "not newer" so a flaky HEAD
+    /// request doesn't force an unnecessary re-download or abort the run.
+    /// </summary>
+    private async Task<bool> IsRemoteNewerAsync(string url, DateTime localTimestampUtc, string countryCode, CancellationToken ct)
+    {
+        try
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Head, url);
+            using var response = await _httpClient.SendAsync(request, ct);
+            response.EnsureSuccessStatusCode();
+
+            if (response.Content.Headers.LastModified is DateTimeOffset lastModified)
+            {
+                return lastModified.UtcDateTime > localTimestampUtc;
+            }
+
+            return false;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not check upstream freshness for {Country}; keeping local file", countryCode);
+            return false;
+        }
     }
 }

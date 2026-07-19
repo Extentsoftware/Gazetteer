@@ -3,6 +3,7 @@ using System;
 using Gazetteer.Infrastructure.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using NetTopologySuite.Geometries;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
@@ -12,9 +13,11 @@ using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 namespace Gazetteer.Infrastructure.Migrations
 {
     [DbContext(typeof(GazetteerDbContext))]
-    partial class GazetteerDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260717121438_AddSeedCheckpointToCountries")]
+    partial class AddSeedCheckpointToCountries
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -159,63 +162,6 @@ namespace Gazetteer.Infrastructure.Migrations
                     b.ToTable("locations", (string)null);
                 });
 
-            modelBuilder.Entity("Gazetteer.Core.Models.LocationGroup", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid")
-                        .HasColumnName("id");
-
-                    b.Property<DateTime>("CreatedAtUtc")
-                        .HasColumnType("timestamp with time zone")
-                        .HasColumnName("created_at_utc");
-
-                    b.Property<string>("Name")
-                        .IsRequired()
-                        .HasMaxLength(200)
-                        .HasColumnType("character varying(200)")
-                        .HasColumnName("name");
-
-                    b.Property<DateTime>("UpdatedAtUtc")
-                        .HasColumnType("timestamp with time zone")
-                        .HasColumnName("updated_at_utc");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("Name")
-                        .IsUnique()
-                        .HasDatabaseName("ix_location_groups_name");
-
-                    b.ToTable("location_groups", (string)null);
-                });
-
-            modelBuilder.Entity("Gazetteer.Core.Models.LocationGroupMember", b =>
-                {
-                    b.Property<Guid>("GroupId")
-                        .HasColumnType("uuid")
-                        .HasColumnName("group_id");
-
-                    b.Property<string>("LocationType")
-                        .HasMaxLength(50)
-                        .HasColumnType("character varying(50)")
-                        .HasColumnName("location_type");
-
-                    b.Property<float>("Boost")
-                        .HasColumnType("real")
-                        .HasColumnName("boost");
-
-                    b.Property<int>("Rank")
-                        .HasColumnType("integer")
-                        .HasColumnName("rank");
-
-                    b.HasKey("GroupId", "LocationType");
-
-                    b.HasIndex("GroupId", "Rank")
-                        .HasDatabaseName("ix_location_group_members_group_rank");
-
-                    b.ToTable("location_group_members", (string)null);
-                });
-
             modelBuilder.Entity("Gazetteer.Core.Models.Location", b =>
                 {
                     b.HasOne("Gazetteer.Core.Models.Location", "Parent")
@@ -226,25 +172,9 @@ namespace Gazetteer.Infrastructure.Migrations
                     b.Navigation("Parent");
                 });
 
-            modelBuilder.Entity("Gazetteer.Core.Models.LocationGroupMember", b =>
-                {
-                    b.HasOne("Gazetteer.Core.Models.LocationGroup", "Group")
-                        .WithMany("Members")
-                        .HasForeignKey("GroupId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.Navigation("Group");
-                });
-
             modelBuilder.Entity("Gazetteer.Core.Models.Location", b =>
                 {
                     b.Navigation("Children");
-                });
-
-            modelBuilder.Entity("Gazetteer.Core.Models.LocationGroup", b =>
-                {
-                    b.Navigation("Members");
                 });
 #pragma warning restore 612, 618
         }

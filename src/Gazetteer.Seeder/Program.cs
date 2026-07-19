@@ -66,18 +66,37 @@ async Task RunSeeder(IServiceProvider services, SeederOptions options, ILogger l
     {
         logger.LogInformation("=== Processing {Country} ===", countryCode);
 
+        // Look up any existing checkpoint before downloading, so a local file that has
+        // regressed to an older copy than what we last seeded from gets re-downloaded.
+        var seedCheckpointUtc = options.ForceReseed ? null : await importer.GetSeedCheckpointAsync(countryCode);
+
         string? pbfFilePath = null;
 
         // Step 1: Download
         if (steps.Contains("download"))
         {
             var downloader = services.GetRequiredService<PbfDownloader>();
-            pbfFilePath = await downloader.DownloadAsync(countryCode, options.DataDirectory);
+            pbfFilePath = await downloader.DownloadAsync(countryCode, options.DataDirectory, seedCheckpointUtc);
         }
         else
         {
             pbfFilePath = Path.Combine(options.DataDirectory, $"{countryCode.ToLowerInvariant()}-latest.osm.pbf");
         }
+
+        var fileTimestampUtc = File.Exists(pbfFilePath) ? File.GetLastWriteTimeUtc(pbfFilePath) : (DateTime?)null;
+
+        var wantsSeeding = steps.Contains("parse") || steps.Contains("load") || steps.Contains("hierarchy");
+
+        if (wantsSeeding && !options.ForceReseed && seedCheckpointUtc is not null && fileTimestampUtc is not null
+            && seedCheckpointUtc >= fileTimestampUtc)
+        {
+            logger.LogInformation(
+                "{Country} already seeded from this file version (seeded from file dated {Checkpoint:u}, current file dated {FileDate:u}); skipping parse/load/hierarchy. Use ForceReseed to override.",
+                countryCode, seedCheckpointUtc, fileTimestampUtc);
+            continue;
+        }
+
+        var seeded = false;
 
         // Step 2 & 3: Parse and Load
         if (steps.Contains("parse") || steps.Contains("load"))
@@ -94,6 +113,7 @@ async Task RunSeeder(IServiceProvider services, SeederOptions options, ILogger l
             var parser = services.GetRequiredService<OsmParser>();
             var locations = parser.Parse(pbfFilePath, countryCode);
             await importer.ImportLocationsAsync(locations, options.BatchSize);
+            seeded = true;
         }
 
         // Step 4: Build hierarchy
@@ -105,6 +125,14 @@ async Task RunSeeder(IServiceProvider services, SeederOptions options, ILogger l
             // Synthesize postcode districts/areas after hierarchy is built (so parents are available)
             var postcodeSynthesizer = services.GetRequiredService<PostcodeSynthesizer>();
             await postcodeSynthesizer.SynthesizeAsync(countryCode);
+            seeded = true;
+        }
+
+        // Record the checkpoint only once the country has been fully (re)processed for this
+        // file version, so a crash mid-country still results in "not seeded" on next restart.
+        if (seeded && fileTimestampUtc is not null)
+        {
+            await importer.SetSeedCheckpointAsync(countryCode, fileTimestampUtc.Value);
         }
     }
 
