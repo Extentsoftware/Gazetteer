@@ -52,8 +52,9 @@ Thumbs.db
 ## Docker
 .env
 
-## Data files (seed downloads at repo root only — do not ignore */Data/ source folders)
+## Data files (seed downloads — do not ignore Infrastructure/Data source folders)
 /data/
+src/Gazetteer.Seeder/data/
 *.osm.pbf
 *.osm
 **/appsettings.Development.json
