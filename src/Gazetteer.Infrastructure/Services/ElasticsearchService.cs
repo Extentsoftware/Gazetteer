@@ -3,6 +3,7 @@ using Elastic.Clients.Elasticsearch.IndexManagement;
 using Elastic.Clients.Elasticsearch.Mapping;
 using Elastic.Clients.Elasticsearch.QueryDsl;
 using Gazetteer.Core.DTOs;
+using Gazetteer.Core.Enums;
 using Gazetteer.Core.Interfaces;
 using Microsoft.Extensions.Logging;
 
@@ -134,24 +135,30 @@ public class ElasticsearchService : IElasticsearchService
 
     public async Task BulkIndexAsync(IEnumerable<LocationIndexDocument> documents, CancellationToken ct = default)
     {
-        var batch = documents.ToList();
+        var batch = documents as List<LocationIndexDocument> ?? documents.ToList();
         if (batch.Count == 0) return;
 
-        var response = await _client.BulkAsync(b => b
-            .Index(IndexName)
-            .IndexMany(batch, (op, doc) => op.Id(doc.Id.ToString())),
-            ct
-        );
+        // Smaller HTTP payloads behave much better over kubectl port-forward than one
+        // giant 5k-doc bulk (and avoid proxy/buffer timeouts).
+        const int chunkSize = 500;
+        for (var i = 0; i < batch.Count; i += chunkSize)
+        {
+            var chunk = batch.GetRange(i, Math.Min(chunkSize, batch.Count - i));
+            var response = await _client.BulkAsync(b => b
+                .Index(IndexName)
+                .Refresh(Refresh.False)
+                .IndexMany(chunk, (op, doc) => op.Id(doc.Id.ToString())),
+                ct
+            );
 
-        if (response.Errors)
-        {
-            var errorCount = response.ItemsWithErrors.Count();
-            _logger.LogWarning("Bulk index had {ErrorCount} errors out of {Total}", errorCount, batch.Count);
+            if (response.Errors)
+            {
+                var errorCount = response.ItemsWithErrors.Count();
+                _logger.LogWarning("Bulk index had {ErrorCount} errors out of {Total}", errorCount, chunk.Count);
+            }
         }
-        else
-        {
-            _logger.LogDebug("Bulk indexed {Count} documents", batch.Count);
-        }
+
+        _logger.LogDebug("Bulk indexed {Count} documents", batch.Count);
     }
 
     public async Task<List<LocationSearchHit>> SearchAsync(GazetteerSearchRequest request, CancellationToken ct = default)
@@ -277,24 +284,28 @@ public class ElasticsearchService : IElasticsearchService
 
     public async Task BulkIndexBoundariesAsync(IEnumerable<BoundaryIndexDocument> documents, CancellationToken ct = default)
     {
-        var batch = documents.ToList();
+        var batch = documents as List<BoundaryIndexDocument> ?? documents.ToList();
         if (batch.Count == 0) return;
 
-        var response = await _client.BulkAsync(b => b
-            .Index(BoundariesIndexName)
-            .IndexMany(batch, (op, doc) => op.Id(doc.OsmId.ToString())),
-            ct
-        );
+        const int chunkSize = 100; // boundary docs include geometry — keep chunks small
+        for (var i = 0; i < batch.Count; i += chunkSize)
+        {
+            var chunk = batch.GetRange(i, Math.Min(chunkSize, batch.Count - i));
+            var response = await _client.BulkAsync(b => b
+                .Index(BoundariesIndexName)
+                .Refresh(Refresh.False)
+                .IndexMany(chunk, (op, doc) => op.Id(doc.OsmId.ToString())),
+                ct
+            );
 
-        if (response.Errors)
-        {
-            var errorCount = response.ItemsWithErrors.Count();
-            _logger.LogWarning("Boundaries bulk index had {ErrorCount} errors out of {Total}", errorCount, batch.Count);
+            if (response.Errors)
+            {
+                var errorCount = response.ItemsWithErrors.Count();
+                _logger.LogWarning("Boundaries bulk index had {ErrorCount} errors out of {Total}", errorCount, chunk.Count);
+            }
         }
-        else
-        {
-            _logger.LogDebug("Bulk indexed {Count} boundary documents", batch.Count);
-        }
+
+        _logger.LogDebug("Bulk indexed {Count} boundary documents", batch.Count);
     }
 
     public async Task DeleteBoundariesIndexAsync(CancellationToken ct = default)
@@ -407,21 +418,24 @@ public class ElasticsearchService : IElasticsearchService
                 )
             };
 
-            // Location-group type boosts (rank importance within a group)
-            if (request.TypeBoosts is { Count: > 0 })
+            // Location-type ranking: prefer larger areas by default.
+            // When a location group supplies TypeBoosts, those override the defaults
+            // (and also act as a type filter further below).
+            var typeBoosts = request.TypeBoosts is { Count: > 0 }
+                ? request.TypeBoosts
+                    .Where(t => t.Boost > 1f)
+                    .Select(t => (t.LocationType.ToString(), t.Boost))
+                : DefaultAreaTypeBoosts.Select(kv => (kv.Key, kv.Value));
+
+            foreach (var (typeName, boost) in typeBoosts)
             {
-                foreach (var typeBoost in request.TypeBoosts.Where(t => t.Boost > 1f))
-                {
-                    var typeName = typeBoost.LocationType.ToString();
-                    var boost = typeBoost.Boost;
-                    shouldClauses.Add(s => s.ConstantScore(cs => cs
-                        .Filter(f => f.Term(t => t
-                            .Field(d => d.LocationType)
-                            .Value(typeName)
-                        ))
-                        .Boost(boost)
-                    ));
-                }
+                shouldClauses.Add(s => s.ConstantScore(cs => cs
+                    .Filter(f => f.Term(t => t
+                        .Field(d => d.LocationType)
+                        .Value(typeName)
+                    ))
+                    .Boost(boost)
+                ));
             }
 
             b.Should(shouldClauses.ToArray());
@@ -471,6 +485,28 @@ public class ElasticsearchService : IElasticsearchService
                 b.Filter(filters.ToArray());
         });
     }
+
+    /// <summary>
+    /// Default ranking boosts so larger geographic areas outrank finer features
+    /// (e.g. City beats Road/Amenity for the same name match).
+    /// </summary>
+    private static readonly Dictionary<string, float> DefaultAreaTypeBoosts = new()
+    {
+        [nameof(LocationType.Country)] = 200,
+        [nameof(LocationType.AdminRegion1)] = 150,
+        [nameof(LocationType.AdminRegion2)] = 120,
+        [nameof(LocationType.AdminRegion3)] = 100,
+        [nameof(LocationType.City)] = 80,
+        [nameof(LocationType.Town)] = 60,
+        [nameof(LocationType.PostcodeArea)] = 50,
+        [nameof(LocationType.Village)] = 40,
+        [nameof(LocationType.PostcodeDistrict)] = 35,
+        [nameof(LocationType.Neighborhood)] = 25,
+        [nameof(LocationType.Locality)] = 25,
+        [nameof(LocationType.Postcode)] = 15,
+        [nameof(LocationType.Road)] = 5,
+        [nameof(LocationType.Amenity)] = 5,
+    };
 
     /// <summary>
     /// Normalizes a postcode query by stripping spaces and uppercasing,

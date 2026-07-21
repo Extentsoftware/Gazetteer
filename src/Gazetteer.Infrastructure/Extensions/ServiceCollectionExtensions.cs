@@ -25,7 +25,7 @@ public static class ServiceCollectionExtensions
                     // Port-forwarded/tunnelled connections can drop transiently; retry with backoff
                     // instead of failing the whole run.
                     .EnableRetryOnFailure(
-                        maxRetryCount: 6,
+                        maxRetryCount: 60,
                         maxRetryDelay: TimeSpan.FromSeconds(30),
                         errorCodesToAdd: null)
             )
@@ -35,7 +35,16 @@ public static class ServiceCollectionExtensions
         var esUrl = configuration["Elasticsearch:Url"] ?? "http://127.0.0.1:9200";
         var settings = new ElasticsearchClientSettings(new Uri(esUrl))
             .DefaultIndex("locations")
-            .EnableDebugMode();
+            // Bulk indexing through kubectl port-forward needs a long timeout; 5k-doc
+            // payloads easily exceed the default 60s when the tunnel is congested.
+            .RequestTimeout(TimeSpan.FromMinutes(10))
+            .EnableHttpCompression();
+
+        // EnableDebugMode buffers full request/response bodies — catastrophic for bulk
+        // indexing (multi-MB payloads logged per batch). Opt in only when debugging.
+        if (string.Equals(configuration["Elasticsearch:EnableDebugMode"], "true", StringComparison.OrdinalIgnoreCase))
+            settings.EnableDebugMode();
+
         var client = new ElasticsearchClient(settings);
         services.AddSingleton(client);
 
